@@ -94,10 +94,14 @@ let currentShowId = null;
 let showsFilter = 'watching';
 let platformFilter = '';
 let privateVisible = false;
+let nextLimit = 60;
+let showsLimit = 120;
 const isHidden = (x) => x.private && !privateVisible;
 
 export function switchView(name) {
   if (name !== 'detail' && name !== 'import') previousView = name;
+  if (name === 'next') nextLimit = 60;
+  if (name === 'shows') showsLimit = 120;
   currentView = name;
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   $(`#view-${name}`).classList.add('active');
@@ -171,7 +175,8 @@ async function renderNext() {
     (b.nextEp.airstamp || '').localeCompare(a.nextEp.airstamp || ''));
 
   $('#next-empty').classList.toggle('hidden', items.length > 0);
-  $('#next-list').innerHTML = items.map(({ show, nextEp, behind, resumePct }) => `
+  const shown = items.slice(0, nextLimit);
+  $('#next-list').innerHTML = shown.map(({ show, nextEp, behind, resumePct }) => `
     <div class="ep-card" data-show="${show.id}">
       <div class="poster" data-open="${show.id}" style="${imgCss(show.image)}"></div>
       <div class="body">
@@ -186,7 +191,11 @@ async function renderNext() {
         <button class="check-btn" data-watch="${nextEp.id}" data-watch-show="${show.id}"
                 aria-label="Mark watched">&#10003;</button>
       </div>
-    </div>`).join('');
+    </div>`).join('')
+    + (items.length > shown.length
+      ? `<button class="big-btn" id="next-more">Show more (${items.length - shown.length} more shows)</button>` : '');
+  const moreBtn = $('#next-more');
+  if (moreBtn) moreBtn.onclick = () => { nextLimit += 120; renderNext(); };
 }
 
 // ---------- Upcoming ----------
@@ -259,7 +268,8 @@ async function renderShows() {
   tiles.sort((a, b) => a.show.name.localeCompare(b.show.name));
 
   $('#shows-empty').classList.toggle('hidden', shows.length > 0);
-  $('#shows-grid').innerHTML = tiles.map(({ show, p }) => {
+  const shownTiles = tiles.slice(0, showsLimit);
+  $('#shows-grid').innerHTML = shownTiles.map(({ show, p }) => {
     const sub = show.archived ? 'Stopped'
       : p.behind > 0 ? `${p.behind} left` : (show.status === 'Ended' ? 'Finished' : 'Up to date');
     return `
@@ -270,7 +280,11 @@ async function renderShows() {
       <div class="t-name">${show.private ? '&#128274; ' : ''}${esc(show.name)}</div>
       <div class="t-sub">${sub} &middot; ${p.pct}%</div>
     </div>`;
-  }).join('');
+  }).join('')
+    + (tiles.length > shownTiles.length
+      ? `<button class="big-btn" id="shows-more" style="grid-column:1/-1">Show more (${tiles.length - shownTiles.length} more)</button>` : '');
+  const moreTiles = $('#shows-more');
+  if (moreTiles) moreTiles.onclick = () => { showsLimit += 240; renderShows(); };
 }
 
 // ---------- Search ----------
@@ -353,11 +367,13 @@ async function setEpProgress(epId, showId, progress) {
 
 async function bumpEpRewatch(epId, showId) {
   const prev = await db.get('watched', epId);
+  const ts = new Date().toISOString();
   await db.put('watched', {
     epId, showId,
-    watchedAt: new Date().toISOString(),
+    watchedAt: ts,
     progress: 100,
     rewatchCount: wRe(prev) + 1,
+    rewatches: [...(prev?.rewatches || []), ts], // each rewatch keeps its date
     source: 'app',
   });
 }
@@ -631,7 +647,7 @@ async function renderMore() {
     ]);
     if (!action) return;
     if (action === 'watched') { m.progress = 100; m.watchedAt = new Date().toISOString(); }
-    else if (action === 'rewatch') { m.progress = 100; m.rewatchCount = wRe(m) + 1; m.watchedAt = new Date().toISOString(); }
+    else if (action === 'rewatch') { const ts = new Date().toISOString(); m.progress = 100; m.rewatchCount = wRe(m) + 1; m.rewatches = [...(m.rewatches || []), ts]; m.watchedAt = ts; }
     else if (action === 'partial') {
       const n = askPercent(wProg(m));
       if (n === null) return;

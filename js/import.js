@@ -100,25 +100,38 @@ function findCol(headers, patterns) {
 
 function detectFields(headers) {
   return {
-    entityType: findCol(headers, [/^entity[-_ ]?type$/, /^type$/]),
-    seriesId:   findCol(headers, [/^series[-_ ]?id$/, /^(tv[-_ ]?)?show[-_ ]?id$/, /tvdb.*series/, /series.*tvdb/]),
-    episodeId:  findCol(headers, [/^episode[-_ ]?id$/, /tvdb.*episode/]),
+    entityType: findCol(headers, [/^entity[-_ ]?type$/]),
+    // real TV Time export uses a `key` column (watch-episode-…/user-series-…)
+    // in v2 and a `type` column (watch/follow/towatch/rewatch) in v1
+    recordKey:  findCol(headers, [/^key$/, /^gsi$/]),
+    action:     findCol(headers, [/^type$/]),
+    seriesId:   findCol(headers, [/^s_id$/, /^series[-_ ]?id$/, /^tv[-_ ]?show[-_ ]?id$/, /^show[-_ ]?id$/, /tvdb.*series/]),
+    episodeId:  findCol(headers, [/^ep(isode)?[-_ ]?id$/, /tvdb.*episode/]),
     movieId:    findCol(headers, [/^movie[-_ ]?id$/]),
     imdbId:     findCol(headers, [/imdb/]),
-    season:     findCol(headers, [/^season([-_ ]?(number|num))?$/, /season/]),
-    epNumber:   findCol(headers, [/^episode[-_ ]?(number|num)$/, /^(ep[-_ ]?)?number$/, /episode.*number/]),
-    title:      findCol(headers, [/^(series|show)[-_ ]?name$/, /^tv[-_ ]?show[-_ ]?name$/, /^title$/, /^name$/, /name|title/]),
-    watchedAt:  findCol(headers, [/watched[-_ ]?(at|date|on)/, /^created[-_ ]?at$/, /^date$/, /updated[-_ ]?at/]),
+    season:     findCol(headers, [/^(episode_)?season[-_ ]?(number|num)$/, /^s_no$/, /season/]),
+    epNumber:   findCol(headers, [/^episode[-_ ]?(number|num)$/, /^ep_no$/, /^(ep[-_ ]?)?number$/, /episode.*number/]),
+    title:      findCol(headers, [/^(series|show)[-_ ]?name$/, /^tv[-_ ]?show[-_ ]?name$/, /^title$/, /^name$/]),
+    movieTitle: findCol(headers, [/^movie[-_ ]?name$/]),
+    watchedAt:  findCol(headers, [/watched[-_ ]?(at|date|on)/, /^watch[-_ ]?date$/, /^created[-_ ]?at$/, /^date$/, /updated[-_ ]?at/]),
     rating:     findCol(headers, [/rating/]),
-    status:     findCol(headers, [/^status$/, /watch.*status/, /list/]),
   };
 }
 
 function classifyRow(row, f) {
+  const key = f.recordKey ? (row[f.recordKey] || '') : '';
+  const action = f.action ? (row[f.action] || '').toLowerCase() : '';
   const et = f.entityType ? (row[f.entityType] || '').toLowerCase() : '';
+  // aggregates/counters in the real export — not importable events
+  if (key === 'tracking-stats' || action.startsWith('count-') || action.startsWith('last-episode')
+      || action === 'time-count' || action === 'rewatch_count') return 'unknown';
+  if (key.startsWith('user-series-')) return 'follow';
   const hasEp = (f.season && row[f.season] !== '') || (f.episodeId && row[f.episodeId] !== '');
-  if (et.includes('movie') || (f.movieId && row[f.movieId] !== '' && !hasEp)) return 'movie';
-  if (et.includes('episode') || hasEp) return 'episode';
+  const isMovie = et.includes('movie')
+    || (f.movieTitle && row[f.movieTitle] !== '' && !hasEp)
+    || (f.movieId && row[f.movieId] !== '' && !hasEp);
+  if (isMovie) return action === 'towatch' || action === 'follow' ? 'watchlistMovie' : 'movie';
+  if (et.includes('episode') || hasEp || key.startsWith('watch-episode-') || key.startsWith('rewatch-episode-')) return 'episode';
   if (et.includes('series') || et.includes('show')) return 'follow';
   if (f.seriesId && row[f.seriesId] !== '') return 'follow';
   return 'unknown';
@@ -140,25 +153,26 @@ export async function analyzeFiles(files) {
     }
   }
 
-  const episodes = [], movies = [], follows = [], unknown = [];
+  const episodes = [], movies = [], follows = [], watchlistMovies = [], unknown = [];
   const analyzed = [];
   for (const c of csvs) {
     if (c.json) { analyzed.push({ name: c.name, note: 'JSON file — kept for reference, not imported', rows: 0 }); continue; }
     const { headers, records } = parseCSV(c.text);
     if (!records.length) { analyzed.push({ name: c.name, note: 'empty', rows: 0 }); continue; }
     const f = detectFields(headers);
-    const counts = { episode: 0, movie: 0, follow: 0, unknown: 0 };
+    const counts = { episode: 0, movie: 0, follow: 0, watchlistMovie: 0, unknown: 0 };
     for (const r of records) {
       const kind = classifyRow(r, f);
       counts[kind]++;
       if (kind === 'episode') episodes.push({ r, f, file: c.name });
       else if (kind === 'movie') movies.push({ r, f, file: c.name });
+      else if (kind === 'watchlistMovie') watchlistMovies.push({ r, f, file: c.name });
       else if (kind === 'follow') follows.push({ r, f, file: c.name });
       else unknown.push({ r, file: c.name });
     }
     analyzed.push({ name: c.name, rows: records.length, headers, fields: f, counts });
   }
-  return { analyzed, episodes, movies, follows, unknown };
+  return { analyzed, episodes, movies, follows, watchlistMovies, unknown };
 }
 
 function num(v) { const n = parseInt(v, 10); return Number.isFinite(n) ? n : null; }
@@ -169,7 +183,7 @@ function isoDate(v) {
 }
 
 export async function runImport(plan, log, setProgress) {
-  const { episodes, movies, follows } = plan;
+  const { episodes, movies, follows, watchlistMovies = [] } = plan;
   const report = { matchedShows: 0, unmatchedShows: [], watchedImported: 0, epUnmatched: 0, moviesImported: 0, followsImported: 0 };
 
   // -- group episode + follow rows by show key (tvdb id, else name) --
@@ -272,7 +286,7 @@ export async function runImport(plan, log, setProgress) {
   const seen = new Set((await db.all('movies')).map(m => m.imdbId || m.title));
   const movieRows = [];
   for (const { r, f } of movies) {
-    const title = f.title ? r[f.title] : null;
+    const title = (f.movieTitle && r[f.movieTitle]) || (f.title ? r[f.title] : null);
     const imdb = f.imdbId ? r[f.imdbId] : null;
     if (!title && !imdb) continue;
     const dedupeKey = imdb || title;
@@ -286,6 +300,18 @@ export async function runImport(plan, log, setProgress) {
   }
   if (movieRows.length) await db.putMany('movies', movieRows);
   report.moviesImported = movieRows.length;
+
+  // -- watch-later movies --
+  const wlSeen = new Set((await db.all('watchlist')).map(w => w.title));
+  const wlRows = [];
+  for (const { r, f } of watchlistMovies) {
+    const title = (f.movieTitle && r[f.movieTitle]) || (f.title ? r[f.title] : null);
+    if (!title || wlSeen.has(title) || seen.has(title)) continue;
+    wlSeen.add(title);
+    wlRows.push({ id: uuid(), type: 'movie', title, addedAt: isoDate(f.watchedAt ? r[f.watchedAt] : null) });
+  }
+  if (wlRows.length) await db.putMany('watchlist', wlRows);
+  report.watchlistImported = wlRows.length;
 
   await kv.set('import:lastReport', { ...report, at: new Date().toISOString() });
   return report;
@@ -313,7 +339,8 @@ export async function startImportUI(files, container, { onDone, onBack }) {
   }
 
   const totalEp = plan.episodes.length, totalMv = plan.movies.length,
-        totalFo = plan.follows.length, totalUn = plan.unknown.length;
+        totalFo = plan.follows.length, totalUn = plan.unknown.length,
+        totalWl = (plan.watchlistMovies || []).length;
 
   container.innerHTML = `
     <button class="back-btn" id="imp-back">&#8592; Cancel</button>
@@ -326,6 +353,7 @@ export async function startImportUI(files, container, { onDone, onBack }) {
         <div class="stat"><div class="num">${totalEp.toLocaleString()}</div><div class="lbl">episode records</div></div>
         <div class="stat"><div class="num">${totalMv}</div><div class="lbl">movie records</div></div>
         <div class="stat"><div class="num">${totalFo}</div><div class="lbl">followed shows</div></div>
+        <div class="stat"><div class="num">${totalWl}</div><div class="lbl">watch-later movies</div></div>
         <div class="stat"><div class="num">${totalUn}</div><div class="lbl">unrecognized rows</div></div>
       </div>
       ${totalEp + totalMv + totalFo === 0 ? `
