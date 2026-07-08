@@ -41,6 +41,20 @@ export const tvmaze = {
   byImdb: (imdbId) => get(`/lookup/shows?imdb=${imdbId}`, { allow404: true }),
 };
 
+// Auto-detect the streaming platform from TVmaze's webChannel/network data,
+// so most shows get their platform tag with no manual step.
+const PLATFORM_MAP = {
+  'netflix': 'Netflix', 'hulu': 'Hulu', 'disney+': 'Disney+',
+  'hbo max': 'Max', 'max': 'Max', 'prime video': 'Prime Video',
+  'amazon prime video': 'Prime Video', 'apple tv+': 'Apple TV+', 'apple tv': 'Apple TV+',
+  'paramount+': 'Paramount+', 'peacock': 'Peacock', 'crunchyroll': 'Crunchyroll',
+  'youtube': 'YouTube', 'youtube premium': 'YouTube',
+};
+export function autoPlatform(raw) {
+  const wc = (raw.webChannel?.name || '').toLowerCase();
+  return PLATFORM_MAP[wc] || '';
+}
+
 export function normalizeShow(raw) {
   return {
     id: raw.id,

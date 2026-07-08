@@ -1,5 +1,5 @@
 import { db, kv, uuid, exportAll, importAll } from './db.js';
-import { tvmaze, normalizeShow, normalizeEpisode } from './api.js';
+import { tvmaze, normalizeShow, normalizeEpisode, autoPlatform } from './api.js';
 import { startImportUI } from './import.js';
 
 // ---------- tiny helpers ----------
@@ -22,6 +22,26 @@ export function toast(msg, ms = 2600) {
   toastTimer = setTimeout(() => el.classList.add('hidden'), ms);
 }
 
+// Bottom action sheet. options: [{label, value, danger}] → resolves value or null.
+function sheet(title, options) {
+  return new Promise(resolve => {
+    const el = $('#sheet');
+    el.innerHTML = `<div class="sheet-card">
+      <h3>${esc(title)}</h3>
+      ${options.map((o, i) =>
+        `<button class="sheet-btn ${o.danger ? 'danger' : ''}" data-i="${i}">${esc(o.label)}</button>`).join('')}
+      <button class="sheet-btn cancel" data-i="-1">Cancel</button></div>`;
+    el.classList.remove('hidden');
+    el.onclick = (ev) => {
+      const b = ev.target.closest('[data-i]');
+      if (!b && ev.target !== el) return;
+      el.classList.add('hidden');
+      const i = b ? Number(b.dataset.i) : -1;
+      resolve(i >= 0 ? options[i].value : null);
+    };
+  });
+}
+
 function fmtDate(iso) {
   if (!iso) return 'TBA';
   const d = new Date(iso);
@@ -37,6 +57,30 @@ function hasAired(ep, now = Date.now()) {
   if (ep.airdate) return new Date(ep.airdate + 'T23:59:59').getTime() <= now;
   return false; // no date = unaired/TBA
 }
+// watch-record accessors (older records have no progress/rewatchCount fields)
+const wProg = (w) => w ? Math.min(100, w.progress ?? 100) : 0;
+const wRe = (w) => w ? (w.rewatchCount ?? 0) : 0;
+const fmtHours = (min) => min >= 1440 ? `${(min / 1440).toFixed(1)} days` : `${Math.round(min / 60)} h`;
+
+const PLATFORM_DEFAULTS = ['Netflix', 'Hulu', 'Disney+', 'Max', 'Prime Video', 'Apple TV+', 'Crunchyroll', 'Paramount+', 'Peacock', 'YouTube'];
+
+async function usedPlatforms() {
+  const [shows, movies] = await Promise.all([db.all('shows'), db.all('movies')]);
+  const used = new Set([...shows, ...movies].map(x => x.platform).filter(Boolean));
+  return [...used].sort();
+}
+
+async function pickPlatform(current, suggestion) {
+  const used = await usedPlatforms();
+  const opts = [...new Set([...(suggestion ? [suggestion] : []), ...used, ...PLATFORM_DEFAULTS])]
+    .map(p => ({ label: p + (p === current ? ' ✓' : ''), value: p }));
+  opts.push({ label: '＋ New platform…', value: '__new__' });
+  if (current) opts.push({ label: 'Clear platform', value: '__clear__', danger: true });
+  let v = await sheet('Which platform?', opts);
+  if (v === '__new__') v = (prompt('Platform name:') || '').trim() || null;
+  if (v === '__clear__') return '';
+  return v; // null = cancelled
+}
 
 // ---------- view switching ----------
 
@@ -48,6 +92,9 @@ let currentView = 'next';
 let previousView = 'next';
 let currentShowId = null;
 let showsFilter = 'watching';
+let platformFilter = '';
+let privateVisible = false;
+const isHidden = (x) => x.private && !privateVisible;
 
 export function switchView(name) {
   if (name !== 'detail' && name !== 'import') previousView = name;
@@ -75,7 +122,7 @@ async function libraryState() {
   const [shows, episodes, watched] = await Promise.all([
     db.all('shows'), db.all('episodes'), db.all('watched'),
   ]);
-  const watchedSet = new Set(watched.map(w => w.epId));
+  const watchedMap = new Map(watched.map(w => [w.epId, w]));
   const lastActivity = {};
   for (const w of watched) {
     const t = w.watchedAt ? new Date(w.watchedAt).getTime() : 0;
@@ -85,47 +132,55 @@ async function libraryState() {
   for (const e of episodes) (epsByShow[e.showId] ||= []).push(e);
   for (const id in epsByShow)
     epsByShow[id].sort((a, b) => a.season - b.season || (a.number ?? 0) - (b.number ?? 0));
-  return { shows, epsByShow, watchedSet, lastActivity };
+  return { shows, epsByShow, watchedMap, lastActivity };
 }
 
-function showProgress(show, epsByShow, watchedSet, now = Date.now()) {
+// Progress model: an episode contributes fractionally (its % seen) to season/show
+// percentages, but only counts as "done" at 100%.
+function showProgress(show, epsByShow, watchedMap, now = Date.now()) {
   const eps = (epsByShow[show.id] || []).filter(e => e.type === 'regular' && e.number != null);
   const aired = eps.filter(e => hasAired(e, now));
-  const airedWatched = aired.filter(e => watchedSet.has(e.id));
-  const nextEp = aired.find(e => !watchedSet.has(e.id)) || null;
+  let seenUnits = 0, doneCount = 0, nextEp = null, resumePct = null;
+  for (const e of aired) {
+    const p = wProg(watchedMap.get(e.id));
+    seenUnits += p / 100;
+    if (p >= 100) doneCount++;
+    else if (!nextEp) { nextEp = e; resumePct = p > 0 ? p : null; }
+  }
   return {
     total: eps.length,
     aired: aired.length,
-    watched: airedWatched.length,
-    behind: aired.length - airedWatched.length,
-    nextEp,
+    watched: doneCount,
+    behind: aired.length - doneCount,
+    pct: aired.length ? Math.round(100 * seenUnits / aired.length) : 0,
+    nextEp, resumePct,
   };
 }
 
 // ---------- Watch Next ----------
 
 async function renderNext() {
-  const { shows, epsByShow, watchedSet, lastActivity } = await libraryState();
+  const { shows, epsByShow, watchedMap, lastActivity } = await libraryState();
   const items = [];
   for (const show of shows) {
-    if (show.archived) continue;
-    const p = showProgress(show, epsByShow, watchedSet);
+    if (show.archived || isHidden(show)) continue;
+    const p = showProgress(show, epsByShow, watchedMap);
     if (p.nextEp) items.push({ show, ...p, activity: lastActivity[show.id] || 0 });
   }
   items.sort((a, b) => b.activity - a.activity ||
     (b.nextEp.airstamp || '').localeCompare(a.nextEp.airstamp || ''));
 
   $('#next-empty').classList.toggle('hidden', items.length > 0);
-  $('#next-list').innerHTML = items.map(({ show, nextEp, behind }) => `
+  $('#next-list').innerHTML = items.map(({ show, nextEp, behind, resumePct }) => `
     <div class="ep-card" data-show="${show.id}">
-      <div class="poster" data-open="${show.id}"
-           style="${imgCss(show.image)}"></div>
+      <div class="poster" data-open="${show.id}" style="${imgCss(show.image)}"></div>
       <div class="body">
         <div class="show-name" data-open="${show.id}">${esc(show.name)}</div>
         <div class="ep-code">${epCode(nextEp)}</div>
         <div class="ep-name">${esc(nextEp.name || '')}</div>
-        <div class="ep-date">${fmtDate(nextEp.airdate || nextEp.airstamp)}</div>
-        ${behind > 1 ? `<div class="behind">${behind} episodes to watch</div>` : ''}
+        <div class="ep-date">${fmtDate(nextEp.airdate || nextEp.airstamp)}${show.platform ? ` &middot; ${esc(show.platform)}` : ''}</div>
+        ${resumePct ? `<div class="behind">Resume &mdash; ${resumePct}% watched</div>`
+          : behind > 1 ? `<div class="behind">${behind} episodes to watch</div>` : ''}
       </div>
       <div class="actions">
         <button class="check-btn" data-watch="${nextEp.id}" data-watch-show="${show.id}"
@@ -137,12 +192,12 @@ async function renderNext() {
 // ---------- Upcoming ----------
 
 async function renderUpcoming() {
-  const { shows, epsByShow, watchedSet } = await libraryState();
+  const { shows, epsByShow } = await libraryState();
   const now = Date.now();
   const horizon = now + 1000 * 60 * 60 * 24 * 90;
   const items = [];
   for (const show of shows) {
-    if (show.archived) continue;
+    if (show.archived || isHidden(show)) continue;
     for (const ep of epsByShow[show.id] || []) {
       if (hasAired(ep, now)) continue;
       const t = ep.airstamp ? new Date(ep.airstamp).getTime()
@@ -164,8 +219,7 @@ async function renderUpcoming() {
     lastDay = label;
     return `${head}
     <div class="ep-card">
-      <div class="poster" data-open="${show.id}"
-           style="${imgCss(show.image)}"></div>
+      <div class="poster" data-open="${show.id}" style="${imgCss(show.image)}"></div>
       <div class="body">
         <div class="show-name" data-open="${show.id}">${esc(show.name)}</div>
         <div class="ep-code">${epCode(ep)}</div>
@@ -179,32 +233,42 @@ async function renderUpcoming() {
 // ---------- My Shows ----------
 
 async function renderShows() {
-  const { shows, epsByShow, watchedSet } = await libraryState();
+  const { shows, epsByShow, watchedMap } = await libraryState();
+
+  // platform filter dropdown
+  const platforms = await usedPlatforms();
+  const sel = $('#platform-filter');
+  const selHTML = `<option value="">All platforms</option>` +
+    platforms.map(p => `<option value="${esc(p)}" ${p === platformFilter ? 'selected' : ''}>${esc(p)}</option>`).join('');
+  if (sel.innerHTML !== selHTML) sel.innerHTML = selHTML;
+  sel.classList.toggle('hidden', platforms.length === 0);
+
   const tiles = [];
   for (const show of shows) {
-    const p = showProgress(show, epsByShow, watchedSet);
+    if (isHidden(show)) continue;
+    if (platformFilter && show.platform !== platformFilter) continue;
+    const p = showProgress(show, epsByShow, watchedMap);
     let bucket;
     if (show.archived) bucket = 'all';
     else if (p.behind > 0) bucket = 'watching';
     else if (show.status === 'Ended') bucket = 'ended';
     else bucket = 'done';
     if (showsFilter !== 'all' && bucket !== showsFilter) continue;
-    tiles.push({ show, p, bucket });
+    tiles.push({ show, p });
   }
   tiles.sort((a, b) => a.show.name.localeCompare(b.show.name));
 
   $('#shows-empty').classList.toggle('hidden', shows.length > 0);
   $('#shows-grid').innerHTML = tiles.map(({ show, p }) => {
-    const pct = p.aired ? Math.round(100 * p.watched / p.aired) : 0;
     const sub = show.archived ? 'Stopped'
       : p.behind > 0 ? `${p.behind} left` : (show.status === 'Ended' ? 'Finished' : 'Up to date');
     return `
     <div class="show-tile" data-open="${show.id}">
       <div class="poster" style="${imgCss(show.image)}">
-        <div class="prog"><div style="width:${pct}%"></div></div>
+        <div class="prog"><div style="width:${p.pct}%"></div></div>
       </div>
-      <div class="t-name">${esc(show.name)}</div>
-      <div class="t-sub">${sub} &middot; ${p.watched}/${p.aired}</div>
+      <div class="t-name">${show.private ? '&#128274; ' : ''}${esc(show.name)}</div>
+      <div class="t-sub">${sub} &middot; ${p.pct}%</div>
     </div>`;
   }).join('');
 }
@@ -242,7 +306,7 @@ async function followShow(tvmazeId) {
   const existing = await db.get('shows', tvmazeId);
   if (existing) { toast('Already following'); return; }
   const raw = await tvmaze.show(tvmazeId);
-  const show = { ...normalizeShow(raw), followedAt: new Date().toISOString(), archived: false, lastEpisodeSync: null };
+  const show = { ...normalizeShow(raw), followedAt: new Date().toISOString(), archived: false, lastEpisodeSync: null, platform: autoPlatform(raw), private: false };
   await db.put('shows', show);
   toast(`Following ${show.name}`);
   syncShowEpisodes(tvmazeId).then(() => { if (currentView === 'next') renderNext(); });
@@ -273,12 +337,50 @@ async function syncStaleShows({ force = false } = {}) {
   return stale.length;
 }
 
-// ---------- watched toggling ----------
+// ---------- watch record updates ----------
 
-async function markWatched(epId, showId) {
-  await db.put('watched', { epId, showId, watchedAt: new Date().toISOString(), source: 'app' });
+async function setEpProgress(epId, showId, progress) {
+  const prev = await db.get('watched', epId);
+  if (progress <= 0) { if (prev) await db.del('watched', epId); return; }
+  await db.put('watched', {
+    epId, showId,
+    watchedAt: new Date().toISOString(),
+    progress: Math.min(100, progress),
+    rewatchCount: wRe(prev),
+    source: 'app',
+  });
 }
-async function unmarkWatched(epId) { await db.del('watched', epId); }
+
+async function bumpEpRewatch(epId, showId) {
+  const prev = await db.get('watched', epId);
+  await db.put('watched', {
+    epId, showId,
+    watchedAt: new Date().toISOString(),
+    progress: 100,
+    rewatchCount: wRe(prev) + 1,
+    source: 'app',
+  });
+}
+
+function askPercent(currentPct) {
+  const v = prompt('How much have you seen? (0–100%)', currentPct || '50');
+  if (v === null) return null;
+  const n = Math.max(0, Math.min(100, parseInt(v, 10) || 0));
+  return n;
+}
+
+// Shared action sheet for anything with progress/rewatch state.
+async function progressSheet(title, current) {
+  const p = wProg(current), r = wRe(current);
+  const state = !current || p === 0 ? 'Not watched'
+    : p < 100 ? `${p}% watched` : r > 0 ? `Watched ×${r + 1}` : 'Watched';
+  return sheet(`${title} — ${state}`, [
+    { label: '✓ Watched', value: 'watched' },
+    ...(p >= 100 ? [{ label: `↻ Watched again (×${r + 2})`, value: 'rewatch' }] : []),
+    { label: '◐ Partially watched…', value: 'partial' },
+    { label: '✕ Not watched', value: 'clear', danger: true },
+  ]);
+}
 
 // ---------- Show detail ----------
 
@@ -289,12 +391,48 @@ async function renderDetail(showId) {
     db.allByIndex('episodes', 'showId', showId),
     db.allByIndex('watched', 'showId', showId),
   ]);
-  const watchedSet = new Set(watchedRows.map(w => w.epId));
+  const watchedMap = new Map(watchedRows.map(w => [w.epId, w]));
   eps.sort((a, b) => a.season - b.season || (a.number ?? 0) - (b.number ?? 0));
   const seasons = {};
   for (const e of eps) { if (e.type === 'regular' && e.number != null) (seasons[e.season] ||= []).push(e); }
   const now = Date.now();
-  const p = showProgress(show, { [showId]: eps }, watchedSet, now);
+  const p = showProgress(show, { [showId]: eps }, watchedMap, now);
+
+  const seasonBlock = ([sn, list]) => {
+    const airedList = list.filter(e => hasAired(e, now));
+    let units = 0, done = 0;
+    for (const e of airedList) {
+      const pr = wProg(watchedMap.get(e.id));
+      units += pr / 100;
+      if (pr >= 100) done++;
+    }
+    const sPct = airedList.length ? Math.round(100 * units / airedList.length) : 0;
+    const allDone = airedList.length > 0 && done === airedList.length;
+    return `
+    <div class="season-block" data-season="${sn}">
+      <div class="season-head">
+        <span>Season ${sn} <span class="s-sub">${done}/${list.length} &middot; ${sPct}%</span></span>
+        <button class="season-mark" data-season-mark="${sn}" ${allDone ? 'disabled' : ''}>
+          ${allDone ? 'All watched' : 'Mark season'}</button>
+      </div>
+      <div class="season-eps hidden">
+        ${list.map(e => {
+          const w = watchedMap.get(e.id);
+          const pr = wProg(w), r = wRe(w);
+          const badge = pr > 0 && pr < 100 ? `<span class="pct-badge">${pr}%</span>`
+            : r > 0 ? `<span class="pct-badge re">×${r + 1}</span>` : '';
+          return `
+          <div class="ep-row ${hasAired(e, now) ? '' : 'future'}" data-ep="${e.id}">
+            <span class="num">${e.number}</span>
+            <span class="nm">${esc(e.name || 'Episode ' + e.number)} ${badge}</span>
+            <span class="dt">${fmtDate(e.airdate)}</span>
+            <button class="mini-check ${pr >= 100 ? 'done' : ''}"
+                    data-ep-toggle="${e.id}" aria-label="Toggle watched">&#10003;</button>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+  };
 
   $('#detail-content').innerHTML = `
     <button class="back-btn" id="detail-back">&#8592; Back</button>
@@ -303,43 +441,37 @@ async function renderDetail(showId) {
       <div class="info">
         <h2>${esc(show.name)}</h2>
         <div class="sub">${[show.network, show.status, show.premiered?.slice(0, 4)].filter(Boolean).map(esc).join(' &middot; ')}</div>
-        <div class="sub">${p.watched}/${p.aired} episodes watched${p.behind ? ` &middot; <b style="color:var(--accent)">${p.behind} left</b>` : ''}</div>
+        <div class="sub">You&rsquo;ve seen <b style="color:var(--accent)">${p.pct}%</b> of this show &middot; ${p.watched}/${p.aired} episodes${p.behind ? ` &middot; ${p.behind} left` : ''}</div>
         <div class="detail-actions">
+          <button class="pill-btn" id="detail-platform">&#128250; ${show.platform ? esc(show.platform) : 'Set platform'}</button>
           <button class="pill-btn" id="detail-sync">&#8635; Update episodes</button>
           <button class="pill-btn" id="detail-archive">${show.archived ? '&#9654; Resume watching' : '&#9208; Stop watching'}</button>
+          <button class="pill-btn" id="detail-private">${show.private ? '&#128275; Unmark private' : '&#128274; Make private'}</button>
           <button class="pill-btn warn" id="detail-unfollow">Remove show</button>
         </div>
       </div>
     </div>
-    ${Object.entries(seasons).map(([sn, list]) => {
-      const w = list.filter(e => watchedSet.has(e.id)).length;
-      const airedList = list.filter(e => hasAired(e, now));
-      const allDone = airedList.length > 0 && airedList.every(e => watchedSet.has(e.id));
-      return `
-      <div class="season-block" data-season="${sn}">
-        <div class="season-head" data-toggle="${sn}">
-          <span>Season ${sn} <span class="s-sub">${w}/${list.length}</span></span>
-          <button class="season-mark" data-season-mark="${sn}" ${allDone ? 'disabled' : ''}>
-            ${allDone ? 'All watched' : 'Mark season'}</button>
-        </div>
-        <div class="season-eps hidden">
-          ${list.map(e => `
-          <div class="ep-row ${hasAired(e, now) ? '' : 'future'}">
-            <span class="num">${e.number}</span>
-            <span class="nm">${esc(e.name || 'Episode ' + e.number)}</span>
-            <span class="dt">${fmtDate(e.airdate)}</span>
-            <button class="mini-check ${watchedSet.has(e.id) ? 'done' : ''}"
-                    data-ep-toggle="${e.id}" aria-label="Toggle watched">&#10003;</button>
-          </div>`).join('')}
-        </div>
-      </div>`;
-    }).join('')}`;
+    ${Object.entries(seasons).map(seasonBlock).join('')}
+    <p class="muted small">Tip: tap an episode&rsquo;s name for more options — partial progress, rewatches.</p>`;
 
   $('#detail-back').onclick = () => switchView(previousView);
+  $('#detail-platform').onclick = async () => {
+    const v = await pickPlatform(show.platform, show.network);
+    if (v === null) return;
+    show.platform = v;
+    await db.put('shows', show);
+    renderDetail(showId);
+  };
   $('#detail-sync').onclick = async () => {
     toast('Updating…');
     try { await syncShowEpisodes(showId); toast('Episodes updated'); renderDetail(showId); }
     catch { toast('Update failed'); }
+  };
+  $('#detail-private').onclick = async () => {
+    show.private = !show.private;
+    await db.put('shows', show);
+    toast(show.private ? 'Marked private — hidden from lists & stats when private mode is off' : 'No longer private');
+    renderDetail(showId);
   };
   $('#detail-archive').onclick = async () => {
     show.archived = !show.archived;
@@ -349,9 +481,8 @@ async function renderDetail(showId) {
   };
   $('#detail-unfollow').onclick = async () => {
     if (!confirm(`Remove "${show.name}" and its watch history from your library?`)) return;
-    const epIds = eps.map(e => e.id);
-    await db.delMany('episodes', epIds);
-    await db.delMany('watched', epIds.filter(id => watchedSet.has(id)));
+    await db.delMany('episodes', eps.map(e => e.id));
+    await db.delMany('watched', watchedRows.map(w => w.epId));
     await db.del('shows', showId);
     toast('Removed');
     switchView(previousView);
@@ -362,17 +493,37 @@ async function renderDetail(showId) {
     const t = ev.target;
     if (t.dataset.seasonMark) {
       const sn = Number(t.dataset.seasonMark);
-      const list = (seasons[sn] || []).filter(e => hasAired(e, now) && !watchedSet.has(e.id));
+      const list = (seasons[sn] || []).filter(e => hasAired(e, now) && wProg(watchedMap.get(e.id)) < 100);
       const ts = new Date().toISOString();
-      await db.putMany('watched', list.map(e => ({ epId: e.id, showId, watchedAt: ts, source: 'app' })));
+      await db.putMany('watched', list.map(e => ({
+        epId: e.id, showId, watchedAt: ts, progress: 100,
+        rewatchCount: wRe(watchedMap.get(e.id)), source: 'app',
+      })));
       toast(`Season ${sn}: ${list.length} marked watched`);
       renderDetail(showId);
       return;
     }
     if (t.dataset.epToggle) {
       const epId = Number(t.dataset.epToggle);
-      if (t.classList.contains('done')) { await unmarkWatched(epId); t.classList.remove('done'); }
-      else { await markWatched(epId, showId); t.classList.add('done'); }
+      const pr = wProg(watchedMap.get(epId));
+      await setEpProgress(epId, showId, pr >= 100 ? 0 : 100);
+      renderDetail(showId);
+      return;
+    }
+    const row = t.closest('.ep-row');
+    if (row && !t.closest('.mini-check')) {
+      const epId = Number(row.dataset.ep);
+      const ep = eps.find(e => e.id === epId);
+      const w = watchedMap.get(epId);
+      const action = await progressSheet(`${epCode(ep)} ${ep.name || ''}`, w);
+      if (action === 'watched') await setEpProgress(epId, showId, 100);
+      else if (action === 'rewatch') await bumpEpRewatch(epId, showId);
+      else if (action === 'partial') {
+        const n = askPercent(wProg(w));
+        if (n !== null) await setEpProgress(epId, showId, n);
+      }
+      else if (action === 'clear') await setEpProgress(epId, showId, 0);
+      if (action) renderDetail(showId);
       return;
     }
     const head = t.closest('.season-head');
@@ -388,32 +539,133 @@ export function openShow(showId) {
 // ---------- More: stats, movies, watchlist ----------
 
 async function renderMore() {
-  const [shows, watched, episodes, movies, watchlist] = await Promise.all([
-    db.all('shows'), db.all('watched'), db.all('episodes'), db.all('movies'), db.all('watchlist'),
+  const [shows, watched, episodes, movies, watchlist, lists] = await Promise.all([
+    db.all('shows'), db.all('watched'), db.all('episodes'), db.all('movies'), db.all('watchlist'), db.all('lists'),
   ]);
-  const epRuntime = new Map(episodes.map(e => [e.id, e.runtime || 40]));
-  let minutes = 0;
-  for (const w of watched) minutes += epRuntime.get(w.epId) || 40;
-  const days = (minutes / 60 / 24).toFixed(1);
+  const epById = new Map(episodes.map(e => [e.id, e]));
+  const showById = new Map(shows.map(s => [s.id, s]));
+  const now = Date.now();
+  const MOVIE_MIN = 110; // assumed avg movie runtime
+
+  // total minutes seen (progress- and rewatch-aware)
+  let seenMin = 0, doneEps = 0;
+  const cutoff30 = now - 30 * 86400000;
+  let recentMin = 0;
+  for (const w of watched) {
+    const wShow = showById.get(w.showId);
+    if (wShow && isHidden(wShow)) continue;
+    const rt = epById.get(w.epId)?.runtime || 40;
+    const min = rt * (wProg(w) / 100) * (1 + wRe(w));
+    seenMin += min;
+    if (wProg(w) >= 100) doneEps++;
+    if (w.watchedAt && new Date(w.watchedAt).getTime() >= cutoff30) recentMin += min;
+  }
+  for (const m of movies) {
+    if (isHidden(m)) continue;
+    const min = MOVIE_MIN * (wProg(m) / 100) * (1 + wRe(m));
+    seenMin += min;
+    if (m.watchedAt && new Date(m.watchedAt).getTime() >= cutoff30) recentMin += min;
+  }
+
+  // backlog: unseen minutes of aired episodes across followed, non-archived shows
+  const watchedMap = new Map(watched.map(w => [w.epId, w]));
+  const backlogByPlatform = new Map(); // platform -> {backlog, seen}
+  let backlogMin = 0;
+  for (const e of episodes) {
+    const show = showById.get(e.showId);
+    if (!show || show.archived || isHidden(show) || e.type !== 'regular' || e.number == null || !hasAired(e, now)) continue;
+    const missing = (e.runtime || 40) * (1 - wProg(watchedMap.get(e.id)) / 100);
+    backlogMin += missing;
+    const key = show.platform || '(no platform)';
+    const b = backlogByPlatform.get(key) || { backlog: 0, seen: 0 };
+    b.backlog += missing;
+    b.seen += (e.runtime || 40) * (wProg(watchedMap.get(e.id)) / 100);
+    backlogByPlatform.set(key, b);
+  }
+
+  const pacePerDay = recentMin / 30; // your average min/day over the last 30 days
+  const etaDays = pacePerDay > 0 ? Math.ceil(backlogMin / pacePerDay) : null;
+  const fmtEta = (min) => pacePerDay > 0 ? `${Math.ceil(min / pacePerDay)} days at your pace` : '—';
 
   $('#stats').innerHTML = `
-    <div class="stat"><div class="num">${shows.length}</div><div class="lbl">shows</div></div>
-    <div class="stat"><div class="num">${watched.length.toLocaleString()}</div><div class="lbl">episodes watched</div></div>
-    <div class="stat"><div class="num">${days}</div><div class="lbl">days of TV</div></div>
-    <div class="stat"><div class="num">${movies.length}</div><div class="lbl">movies</div></div>`;
+    <div class="stat"><div class="num">${shows.filter(s => !isHidden(s)).length}</div><div class="lbl">shows</div></div>
+    <div class="stat"><div class="num">${doneEps.toLocaleString()}</div><div class="lbl">episodes watched</div></div>
+    <div class="stat"><div class="num">${(seenMin / 1440).toFixed(1)}</div><div class="lbl">days of watching</div></div>
+    <div class="stat"><div class="num">${movies.filter(m => !isHidden(m)).length}</div><div class="lbl">movies &amp; items</div></div>
+    <div class="stat"><div class="num">${fmtHours(backlogMin)}</div><div class="lbl">left to watch (backlog)</div></div>
+    <div class="stat"><div class="num">${etaDays != null ? etaDays + 'd' : '—'}</div><div class="lbl">to finish at your pace${pacePerDay ? ` (${Math.round(pacePerDay)} min/day)` : ''}</div></div>`;
 
-  const recentMovies = movies
+  const platRows = [...backlogByPlatform.entries()].sort((a, b) => b[1].backlog - a[1].backlog);
+  $('#platform-stats').innerHTML = platRows.length ? platRows.map(([plat, b]) => `
+    <div class="simple-row"><span>${esc(plat)}</span>
+      <span class="when">${fmtHours(b.backlog)} left &middot; ${fmtEta(b.backlog)}</span></div>`).join('')
+    : '<p class="muted small">Set platforms on your shows (open a show → 📺 Set platform) to see per-platform breakdowns.</p>';
+
+  const visMovies = movies.filter(m => !isHidden(m));
+  const recentMovies = [...visMovies]
     .sort((a, b) => (b.watchedAt || '').localeCompare(a.watchedAt || '')).slice(0, 15);
-  $('#movies-list').innerHTML = recentMovies.map(m => `
-    <div class="simple-row"><span>${esc(m.title)}</span>
-      <span class="when">${m.watchedAt ? fmtDate(m.watchedAt) : ''}</span></div>`).join('')
-    || '<p class="muted small">No movies yet (they import from TV Time).</p>';
-  if (movies.length > 15)
-    $('#movies-list').innerHTML += `<p class="muted small center">…and ${movies.length - 15} more</p>`;
+  $('#movies-list').innerHTML = recentMovies.map(m => {
+    const pr = wProg(m), r = wRe(m);
+    const badge = pr > 0 && pr < 100 ? ` <span class="pct-badge">${pr}%</span>`
+      : r > 0 ? ` <span class="pct-badge re">×${r + 1}</span>` : '';
+    return `
+    <div class="simple-row" data-movie="${m.id}"><span>${m.private ? '&#128274; ' : ''}${esc(m.title)}${badge}${m.platform ? ` <span class="muted small">${esc(m.platform)}</span>` : ''}</span>
+      <span class="when">${m.watchedAt ? fmtDate(m.watchedAt) : 'not watched'}</span></div>`;
+  }).join('') || '<p class="muted small">No movies yet — import TV Time, or add one manually below.</p>';
+  if (visMovies.length > 15)
+    $('#movies-list').innerHTML += `<p class="muted small center">…and ${visMovies.length - 15} more</p>`;
+
+  $('#movies-list').onclick = async (ev) => {
+    const row = ev.target.closest('[data-movie]');
+    if (!row) return;
+    const m = movies.find(x => x.id === row.dataset.movie);
+    if (!m) return;
+    const action = await sheet(m.title, [
+      { label: '✓ Watched', value: 'watched' },
+      ...(wProg(m) >= 100 ? [{ label: `↻ Watched again (×${wRe(m) + 2})`, value: 'rewatch' }] : []),
+      { label: '◐ Partially watched…', value: 'partial' },
+      { label: '📺 Set platform', value: 'platform' },
+      { label: m.private ? '🔓 Unmark private' : '🔒 Make private', value: 'private' },
+      { label: '✕ Not watched', value: 'unwatch' },
+      { label: 'Delete', value: 'delete', danger: true },
+    ]);
+    if (!action) return;
+    if (action === 'watched') { m.progress = 100; m.watchedAt = new Date().toISOString(); }
+    else if (action === 'rewatch') { m.progress = 100; m.rewatchCount = wRe(m) + 1; m.watchedAt = new Date().toISOString(); }
+    else if (action === 'partial') {
+      const n = askPercent(wProg(m));
+      if (n === null) return;
+      m.progress = n; m.watchedAt = new Date().toISOString();
+    }
+    else if (action === 'platform') {
+      const v = await pickPlatform(m.platform, null);
+      if (v === null) return;
+      m.platform = v;
+    }
+    else if (action === 'private') { m.private = !m.private; }
+    else if (action === 'unwatch') { m.progress = 0; m.watchedAt = null; m.rewatchCount = 0; }
+    else if (action === 'delete') {
+      if (!confirm(`Delete "${m.title}"?`)) return;
+      await db.del('movies', m.id);
+      renderMore();
+      return;
+    }
+    await db.put('movies', m);
+    renderMore();
+  };
+
+  $('#lists-list').innerHTML = lists.map(l => `
+    <details class="list-block">
+      <summary>${esc(l.name)} <span class="muted small">${(l.items || []).length} items</span></summary>
+      ${(l.items || []).map(i => `
+      <div class="simple-row"><span>${esc(i.title || '#' + (i.tvdbId ?? '?'))}</span>
+        <span class="when">${esc(i.type || '')}</span></div>`).join('')}
+    </details>`).join('')
+    || '<p class="muted small">No lists yet (custom lists import from TV Time).</p>';
 
   $('#watchlist-list').innerHTML = watchlist.map(w => `
     <div class="simple-row"><span>${esc(w.title)}</span>
-      <span class="when">${w.type}</span></div>`).join('')
+      <span class="when">${esc(w.type)}</span></div>`).join('')
     || '<p class="muted small">Watchlist is empty.</p>';
 }
 
@@ -442,6 +694,11 @@ document.querySelectorAll('.seg').forEach(s => s.addEventListener('click', () =>
   renderShows();
 }));
 
+$('#platform-filter').addEventListener('change', (e) => {
+  platformFilter = e.target.value;
+  renderShows();
+});
+
 $('#search-input').addEventListener('input', (e) => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => doSearch(e.target.value), 400);
@@ -462,7 +719,7 @@ document.body.addEventListener('click', async (ev) => {
     const epId = Number(t.dataset.watch);
     const showId = Number(t.dataset.watchShow);
     t.classList.add('done');
-    await markWatched(epId, showId);
+    await setEpProgress(epId, showId, 100);
     setTimeout(renderNext, 350); // brief tick animation, then show the next episode
     return;
   }
@@ -480,6 +737,29 @@ $('#btn-refresh').addEventListener('click', async () => {
     render(currentView);
   } catch { toast('Refresh failed'); }
   btn.classList.remove('spinning');
+});
+
+$('#btn-add-item').addEventListener('click', async () => {
+  const title = (prompt('Title of the movie/item:') || '').trim();
+  if (!title) return;
+  const item = { id: uuid(), title, imdbId: null, watchedAt: null, progress: 0, rewatchCount: 0, platform: '', rating: null, source: 'manual' };
+  const plat = await pickPlatform('', null);
+  if (plat) item.platform = plat;
+  await db.put('movies', item);
+  toast(`Added "${title}"`);
+  renderMore();
+});
+
+function refreshPrivateBtn() {
+  $('#btn-private').innerHTML = privateVisible
+    ? '&#128275; Private items: <b>visible</b> — tap to hide'
+    : '&#128274; Private items: <b>hidden</b> — tap to show';
+}
+$('#btn-private').addEventListener('click', async () => {
+  privateVisible = !privateVisible;
+  await kv.set('privateVisible', privateVisible);
+  refreshPrivateBtn();
+  render(currentView);
 });
 
 $('#btn-backup').addEventListener('click', downloadBackup);
@@ -514,6 +794,8 @@ $('#file-tvtime').addEventListener('change', async (e) => {
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 
 (async () => {
+  privateVisible = await kv.get('privateVisible', false);
+  refreshPrivateBtn();
   await renderNext();
   // background: refresh stale running shows once per day
   syncStaleShows().then(n => { if (n && currentView === 'next') renderNext(); });

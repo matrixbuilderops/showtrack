@@ -50,6 +50,7 @@
       <button class="seg" data-filter="ended">Finished</button>
       <button class="seg" data-filter="all">All</button>
     </div>
+    <select id="platform-filter" class="platform-select hidden"></select>
     <div id="shows-grid" class="grid"></div>
     <div id="shows-empty" class="empty hidden">
       <p class="empty-icon">&#127909;</p>
@@ -74,14 +75,24 @@
       <button id="btn-backup" class="big-btn">&#128190; Download backup (JSON)</button>
       <button id="btn-restore" class="big-btn">&#9851; Restore from backup</button>
       <input id="file-restore" type="file" accept=".json,application/json" hidden>
+      <button id="btn-private" class="big-btn">&#128274; Private items: <b>hidden</b> &mdash; tap to show</button>
     </div>
     <div class="panel">
       <h2>Stats</h2>
       <div id="stats" class="stats-row"></div>
     </div>
     <div class="panel">
-      <h2>Movies</h2>
+      <h2>Left to watch, per platform</h2>
+      <div id="platform-stats"></div>
+    </div>
+    <div class="panel">
+      <h2>Movies &amp; other items</h2>
       <div id="movies-list"></div>
+      <button id="btn-add-item" class="big-btn" style="margin-top:10px">&#65291; Add anything manually</button>
+    </div>
+    <div class="panel">
+      <h2>Lists</h2>
+      <div id="lists-list"></div>
     </div>
     <div class="panel">
       <h2>Watchlist</h2>
@@ -111,6 +122,7 @@
 </nav>
 
 <div id="toast" class="hidden"></div>
+<div id="sheet" class="hidden"></div>
 
 <script type="module" src="js/app.js"></script>
 </body>

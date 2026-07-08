@@ -9,7 +9,7 @@
 //   kv        { k, v }
 
 const DB_NAME = 'showtrack';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let _db = null;
 
@@ -19,14 +19,20 @@ export function openDB() {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
       const db = req.result;
-      db.createObjectStore('shows', { keyPath: 'id' });
-      const eps = db.createObjectStore('episodes', { keyPath: 'id' });
-      eps.createIndex('showId', 'showId');
-      const w = db.createObjectStore('watched', { keyPath: 'epId' });
-      w.createIndex('showId', 'showId');
-      db.createObjectStore('movies', { keyPath: 'id' });
-      db.createObjectStore('watchlist', { keyPath: 'id' });
-      db.createObjectStore('kv', { keyPath: 'k' });
+      const has = (s) => db.objectStoreNames.contains(s);
+      if (!has('shows')) db.createObjectStore('shows', { keyPath: 'id' });
+      if (!has('episodes')) {
+        const eps = db.createObjectStore('episodes', { keyPath: 'id' });
+        eps.createIndex('showId', 'showId');
+      }
+      if (!has('watched')) {
+        const w = db.createObjectStore('watched', { keyPath: 'epId' });
+        w.createIndex('showId', 'showId');
+      }
+      if (!has('movies')) db.createObjectStore('movies', { keyPath: 'id' });
+      if (!has('watchlist')) db.createObjectStore('watchlist', { keyPath: 'id' });
+      if (!has('lists')) db.createObjectStore('lists', { keyPath: 'id' });
+      if (!has('kv')) db.createObjectStore('kv', { keyPath: 'k' });
     };
     req.onsuccess = () => { _db = req.result; resolve(_db); };
     req.onerror = () => reject(req.error);
@@ -80,7 +86,7 @@ export function uuid() {
 
 // ---- backup / restore ----
 
-const ALL_STORES = ['shows', 'episodes', 'watched', 'movies', 'watchlist', 'kv'];
+const ALL_STORES = ['shows', 'episodes', 'watched', 'movies', 'watchlist', 'lists', 'kv'];
 
 export async function exportAll() {
   const out = { app: 'showtrack', version: DB_VERSION, exportedAt: new Date().toISOString() };
