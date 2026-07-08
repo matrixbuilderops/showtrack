@@ -1,0 +1,11 @@
+{
+  "name": "showtrack-sync-server",
+  "version": "1.0.0",
+  "description": "Sync server for the ShowTrack app — accounts, cross-device sync, streaming-availability alerts. Zero dependencies.",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": { "node": ">=18" }
+}

@@ -1,6 +1,7 @@
-import { db, kv, uuid, exportAll, importAll } from './db.js';
+import { db, kv, uuid, exportAll, importAll, local, migrateStamps } from './db.js';
 import { tvmaze, normalizeShow, normalizeEpisode, autoPlatform } from './api.js';
 import { startImportUI } from './import.js';
+import { sync, registerAccount, loginAccount, signOut, syncNow, fetchAlerts, clearAlerts } from './sync.js';
 
 // ---------- tiny helpers ----------
 
@@ -576,6 +577,7 @@ async function renderDetail(showId) {
         rewatchCount: wRe(watchedMap.get(e.id)), source: 'app',
       })));
       toast(`Season ${sn}: ${list.length} marked watched`);
+      queueSync();
       renderDetail(showId);
       return;
     }
@@ -583,6 +585,7 @@ async function renderDetail(showId) {
       const epId = Number(t.dataset.epToggle);
       const pr = wProg(watchedMap.get(epId));
       await setEpProgress(epId, showId, pr >= 100 ? 0 : 100);
+      queueSync();
       renderDetail(showId);
       return;
     }
@@ -599,7 +602,7 @@ async function renderDetail(showId) {
         if (n !== null) await setEpProgress(epId, showId, n);
       }
       else if (action === 'clear') await setEpProgress(epId, showId, 0);
-      if (action) renderDetail(showId);
+      if (action) { queueSync(); renderDetail(showId); }
       return;
     }
     const head = t.closest('.season-head');
@@ -742,6 +745,9 @@ async function renderMore() {
   $('#set-tmdb').value = await kv.get('settings:tmdbKey', '');
   $('#set-rapid').value = await kv.get('settings:rapidApiKey', '');
   $('#set-tvdb').value = await kv.get('settings:tvdbKey', '');
+  $('#set-availmode').value = await kv.get('settings:availMode', 'app');
+  renderSyncUI();
+  renderAlerts();
 
   $('#watchlist-list').innerHTML = watchlist.map(w => `
     <div class="simple-row"><span>${esc(w.title)}</span>
@@ -791,7 +797,7 @@ document.body.addEventListener('click', async (ev) => {
   if (t.dataset.follow) {
     const id = Number(t.dataset.follow);
     t.disabled = true;
-    try { await followShow(id); t.textContent = 'Following'; t.classList.add('following'); }
+    try { await followShow(id); t.textContent = 'Following'; t.classList.add('following'); queueSync(); }
     catch { toast('Could not follow — try again'); }
     t.disabled = false;
     return;
@@ -801,6 +807,7 @@ document.body.addEventListener('click', async (ev) => {
     const showId = Number(t.dataset.watchShow);
     t.classList.add('done');
     await setEpProgress(epId, showId, 100);
+    queueSync();
     setTimeout(renderNext, 350); // brief tick animation, then show the next episode
     return;
   }
@@ -848,6 +855,93 @@ $('#btn-save-settings').addEventListener('click', async () => {
   await kv.set('settings:rapidApiKey', $('#set-rapid').value.trim());
   await kv.set('settings:tvdbKey', $('#set-tvdb').value.trim());
   toast('Settings saved');
+  queueSync();
+});
+
+// ---------- account & sync ----------
+
+function renderSyncUI() {
+  const signedIn = sync.configured();
+  $('#sync-signedout').classList.toggle('hidden', signedIn);
+  $('#sync-signedin').classList.toggle('hidden', !signedIn);
+  // when the app is served from the sync server itself, default to this origin
+  const sf = $('#acc-server');
+  if (!signedIn && sf && !sf.value && !/github\.io$/.test(location.hostname))
+    sf.value = location.origin;
+  if (signedIn) {
+    const at = sync.lastSyncAt();
+    $('#sync-status').textContent =
+      `Signed in as ${sync.username()} · ${sync.server()}` +
+      (at ? ` · last synced ${new Date(at).toLocaleString()}` : ' · not synced yet');
+  }
+}
+
+async function doSyncNow(silent = false) {
+  if (!sync.configured()) return;
+  const btn = $('#btn-sync');
+  if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
+  try {
+    await syncNow((msg) => { if (btn) btn.textContent = msg; });
+    if (!silent) toast('Synced');
+    await renderAlerts();
+    renderSyncUI();
+    if (currentView !== 'more') render(currentView); // reflect pulled changes
+  } catch (e) {
+    if (!silent) toast('Sync failed: ' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '&#8635; Sync now'; }
+  }
+}
+
+// debounced background sync after local edits
+let syncTimer = null;
+function queueSync() {
+  if (!sync.configured()) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => doSyncNow(true), 4000);
+}
+
+async function renderAlerts() {
+  let alerts = [];
+  try { alerts = await fetchAlerts(); } catch { /* offline */ }
+  const panel = $('#alerts-panel');
+  panel.classList.toggle('hidden', alerts.length === 0);
+  $('#alerts-list').innerHTML = alerts.map(a => `
+    <div class="simple-row"><span>${a.kind === 'left' ? '&#10060;' : '&#9888;'} ${esc(a.message)}</span></div>`).join('');
+}
+
+$('#btn-register').addEventListener('click', async () => {
+  const server = $('#acc-server').value.trim(), u = $('#acc-user').value.trim(), p = $('#acc-pass').value;
+  if (!server || !u || !p) { toast('Fill in server, username, and password'); return; }
+  try {
+    await registerAccount(server, u, p);
+    toast('Account created — uploading your library…');
+    renderSyncUI();
+    await doSyncNow();
+  } catch (e) { toast(e.message); }
+});
+$('#btn-login').addEventListener('click', async () => {
+  const server = $('#acc-server').value.trim(), u = $('#acc-user').value.trim(), p = $('#acc-pass').value;
+  if (!server || !u || !p) { toast('Fill in server, username, and password'); return; }
+  try {
+    await loginAccount(server, u, p);
+    toast('Signed in — syncing…');
+    renderSyncUI();
+    await doSyncNow();
+  } catch (e) { toast(e.message); }
+});
+$('#btn-sync').addEventListener('click', () => doSyncNow());
+$('#btn-signout').addEventListener('click', () => {
+  if (!confirm('Sign out of this device? Your library stays on this device; it just stops syncing.')) return;
+  signOut(); renderSyncUI(); $('#alerts-panel').classList.add('hidden');
+  toast('Signed out');
+});
+$('#set-availmode').addEventListener('change', async (e) => {
+  await kv.set('settings:availMode', e.target.value);
+  queueSync();
+});
+$('#btn-clear-alerts').addEventListener('click', async () => {
+  try { await clearAlerts(); await renderAlerts(); toast('Alerts cleared'); } catch (e) { toast('Failed'); }
 });
 
 $('#btn-backup').addEventListener('click', downloadBackup);
@@ -861,6 +955,7 @@ $('#file-restore').addEventListener('change', async (e) => {
     await importAll(data);
     toast('Backup restored');
     render(currentView);
+    if (sync.configured()) doSyncNow(true);
   } catch (err) { toast('Restore failed: ' + err.message); }
   e.target.value = '';
 });
@@ -871,7 +966,7 @@ $('#file-tvtime').addEventListener('change', async (e) => {
   if (!files.length) return;
   switchView('import');
   startImportUI(files, $('#import-content'), {
-    onDone: () => { toast('Import complete!'); switchView('shows'); },
+    onDone: () => { toast('Import complete!'); switchView('shows'); if (sync.configured()) doSyncNow(true); },
     onBack: () => switchView('more'),
   });
   e.target.value = '';
@@ -881,10 +976,18 @@ $('#file-tvtime').addEventListener('change', async (e) => {
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 
+// push local changes when the app is backgrounded/closed — good moment to sync
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') doSyncNow(true);
+});
+
 (async () => {
   privateVisible = await kv.get('privateVisible', false);
   refreshPrivateBtn();
+  await migrateStamps();
   await renderNext();
   // background: refresh stale running shows once per day
   syncStaleShows().then(n => { if (n && currentView === 'next') renderNext(); });
+  // sync on open (pulls changes made on other devices), then check alerts
+  if (sync.configured()) doSyncNow(true);
 })();

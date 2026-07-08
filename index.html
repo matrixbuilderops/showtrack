@@ -69,6 +69,37 @@
   <!-- MORE -->
   <section id="view-more" class="view">
     <div class="panel">
+      <h2>Account &amp; sync</h2>
+      <div id="sync-signedout">
+        <label class="set-label">Server address
+          <input id="acc-server" type="url" autocomplete="off" inputmode="url" placeholder="http://your-desktop:8570"></label>
+        <label class="set-label">Username
+          <input id="acc-user" type="text" autocomplete="username" placeholder="pick a username"></label>
+        <label class="set-label">Password
+          <input id="acc-pass" type="password" autocomplete="current-password" placeholder="your password"></label>
+        <button id="btn-register" class="big-btn accent">Create account</button>
+        <button id="btn-login" class="big-btn">Sign in</button>
+        <p class="muted small">Your library stays on this device; the server just keeps your devices in sync. Skip this to stay device-only.</p>
+      </div>
+      <div id="sync-signedin" class="hidden">
+        <p id="sync-status" class="muted small"></p>
+        <button id="btn-sync" class="big-btn accent">&#8635; Sync now</button>
+        <label class="set-label" style="margin-top:12px">Check if shows are leaving a platform
+          <select id="set-availmode" class="platform-select" style="margin:6px 0 0">
+            <option value="app">Only when I open the app</option>
+            <option value="background">Only in the background (server checks)</option>
+            <option value="both">Both</option>
+            <option value="none">Never</option>
+          </select></label>
+        <button id="btn-signout" class="big-btn">Sign out of this device</button>
+      </div>
+    </div>
+    <div class="panel hidden" id="alerts-panel">
+      <h2>&#9888; Leaving soon</h2>
+      <div id="alerts-list"></div>
+      <button id="btn-clear-alerts" class="big-btn" style="margin-top:10px">Clear alerts</button>
+    </div>
+    <div class="panel">
       <h2>Your data</h2>
       <button id="btn-import-tvtime" class="big-btn accent">&#128229; Import TV Time export</button>
       <input id="file-tvtime" type="file" accept=".zip,.csv,text/csv,application/zip" multiple hidden>
