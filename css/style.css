@@ -241,6 +241,22 @@ a { color: var(--accent); }
 .empty { text-align: center; padding: 60px 20px; color: var(--muted); }
 .empty .empty-icon { font-size: 3rem; margin-bottom: 10px; }
 
+.set-label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 10px; }
+.set-label input {
+  display: block; width: 100%; margin-top: 5px; padding: 11px 12px;
+  background: var(--bg3); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 10px; font-size: 0.9rem;
+}
+.avail-row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 11px 4px; border-bottom: 1px solid var(--line); font-size: 0.95rem;
+}
+.avail-row:last-child { border-bottom: none; }
+.avail-row .svc { font-weight: 700; }
+.avail-row .kind { color: var(--muted); font-size: 0.82rem; }
+.avail-row .kind.sub { color: var(--good); font-weight: 700; }
+.avail-row .leaving { color: var(--danger); font-size: 0.8rem; font-weight: 700; }
+
 .list-block { padding: 4px 0; }
 .list-block summary { cursor: pointer; font-weight: 600; padding: 8px 0; font-size: 0.95rem; }
 

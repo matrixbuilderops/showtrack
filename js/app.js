@@ -398,6 +398,58 @@ async function progressSheet(title, current) {
   ]);
 }
 
+// ---------- streaming availability (RapidAPI, in-app checks) ----------
+
+async function fetchAvailability(show) {
+  const key = await kv.get('settings:rapidApiKey', '');
+  if (!key) { toast('Add your RapidAPI key in More \u2192 Settings first'); return null; }
+  const cached = await kv.get('avail:' + show.id);
+  if (cached && Date.now() - cached.at < 86400000) return cached.data; // 24h cache saves quota
+  const base = 'https://streaming-availability.p.rapidapi.com';
+  const headers = { 'x-rapidapi-key': key };
+  let data = null;
+  if (show.imdbId) {
+    const res = await fetch(`${base}/shows/${show.imdbId}?country=us`, { headers });
+    if (res.ok) data = await res.json();
+  }
+  if (!data) {
+    const res = await fetch(`${base}/shows/search/title?title=${encodeURIComponent(show.name)}&country=us&show_type=series`, { headers });
+    if (res.ok) { const arr = await res.json(); data = Array.isArray(arr) ? arr[0] || null : arr; }
+  }
+  await kv.set('avail:' + show.id, { at: Date.now(), data });
+  return data;
+}
+
+function showAvailabilitySheet(show, data) {
+  const el = $('#sheet');
+  const opts = (data && data.streamingOptions && data.streamingOptions.us) || [];
+  const seen = new Set();
+  const rows = [];
+  for (const o of opts) {
+    const k = o.service.id + ':' + o.type;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    rows.push(o);
+  }
+  rows.sort((a, b) => (a.type === 'subscription' ? 0 : 1) - (b.type === 'subscription' ? 0 : 1));
+  el.innerHTML = `<div class="sheet-card">
+    <h3>Where to watch \u2014 ${esc(show.name)}</h3>
+    ${rows.length ? rows.map(o => `
+      <div class="avail-row">
+        <span class="svc">${esc(o.service.name)}</span>
+        <span>
+          <span class="kind ${o.type === 'subscription' ? 'sub' : ''}">${esc(o.type)}</span>
+          ${o.expiresSoon ? `<span class="leaving">\u26a0 leaving${o.expiresOn ? ' ' + new Date(o.expiresOn * 1000).toLocaleDateString() : ' soon'}</span>` : ''}
+        </span>
+      </div>`).join('')
+      : '<p class="muted center" style="padding:12px 0">Not streaming anywhere in the US right now.</p>'}
+    <button class="sheet-btn cancel" data-close="1">Close</button></div>`;
+  el.classList.remove('hidden');
+  el.onclick = (ev) => {
+    if (ev.target.dataset.close || ev.target === el) el.classList.add('hidden');
+  };
+}
+
 // ---------- Show detail ----------
 
 async function renderDetail(showId) {
@@ -460,6 +512,7 @@ async function renderDetail(showId) {
         <div class="sub">You&rsquo;ve seen <b style="color:var(--accent)">${p.pct}%</b> of this show &middot; ${p.watched}/${p.aired} episodes${p.behind ? ` &middot; ${p.behind} left` : ''}</div>
         <div class="detail-actions">
           <button class="pill-btn" id="detail-platform">&#128250; ${show.platform ? esc(show.platform) : 'Set platform'}</button>
+          <button class="pill-btn" id="detail-avail">&#128225; Where to watch</button>
           <button class="pill-btn" id="detail-sync">&#8635; Update episodes</button>
           <button class="pill-btn" id="detail-archive">${show.archived ? '&#9654; Resume watching' : '&#9208; Stop watching'}</button>
           <button class="pill-btn" id="detail-private">${show.private ? '&#128275; Unmark private' : '&#128274; Make private'}</button>
@@ -477,6 +530,13 @@ async function renderDetail(showId) {
     show.platform = v;
     await db.put('shows', show);
     renderDetail(showId);
+  };
+  $('#detail-avail').onclick = async () => {
+    toast('Checking availability\u2026');
+    try {
+      const data = await fetchAvailability(show);
+      if (data !== null || await kv.get('settings:rapidApiKey', '')) showAvailabilitySheet(show, data);
+    } catch (e) { toast('Availability check failed'); }
   };
   $('#detail-sync').onclick = async () => {
     toast('Updating…');
@@ -679,6 +739,10 @@ async function renderMore() {
     </details>`).join('')
     || '<p class="muted small">No lists yet (custom lists import from TV Time).</p>';
 
+  $('#set-tmdb').value = await kv.get('settings:tmdbKey', '');
+  $('#set-rapid').value = await kv.get('settings:rapidApiKey', '');
+  $('#set-tvdb').value = await kv.get('settings:tvdbKey', '');
+
   $('#watchlist-list').innerHTML = watchlist.map(w => `
     <div class="simple-row"><span>${esc(w.title)}</span>
       <span class="when">${esc(w.type)}</span></div>`).join('')
@@ -722,7 +786,8 @@ $('#search-input').addEventListener('input', (e) => {
 
 document.body.addEventListener('click', async (ev) => {
   const t = ev.target;
-  if (t.dataset.open) { openShow(t.dataset.open); return; }
+  const opener = t.closest('[data-open]');
+  if (opener) { openShow(opener.dataset.open); return; }
   if (t.dataset.follow) {
     const id = Number(t.dataset.follow);
     t.disabled = true;
@@ -776,6 +841,13 @@ $('#btn-private').addEventListener('click', async () => {
   await kv.set('privateVisible', privateVisible);
   refreshPrivateBtn();
   render(currentView);
+});
+
+$('#btn-save-settings').addEventListener('click', async () => {
+  await kv.set('settings:tmdbKey', $('#set-tmdb').value.trim());
+  await kv.set('settings:rapidApiKey', $('#set-rapid').value.trim());
+  await kv.set('settings:tvdbKey', $('#set-tvdb').value.trim());
+  toast('Settings saved');
 });
 
 $('#btn-backup').addEventListener('click', downloadBackup);
