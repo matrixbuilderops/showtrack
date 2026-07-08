@@ -18,6 +18,9 @@ const PORT = parseInt(process.env.PORT || '8570', 10);
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const PAGE_LIMIT = 4000;          // records per pull page
 const MAX_BODY = 64 * 1024 * 1024; // 64 MB per request
+const MAX_USERS = parseInt(process.env.MAX_USERS || '50', 10); // cap accounts (disk-fill DoS)
+const AUTH_MAX = 20;              // auth attempts per IP per window (brute-force / signup flood)
+const AUTH_WINDOW_MS = 10 * 60 * 1000;
 const STORES = ['shows', 'episodes', 'watched', 'movies', 'watchlist', 'lists', 'kv'];
 const KEY_FIELD = { shows: 'id', episodes: 'id', watched: 'epId', movies: 'id', watchlist: 'id', lists: 'id', kv: 'k' };
 
@@ -78,6 +81,7 @@ function register(username, password) {
   if (!/^[a-z0-9_.-]{3,32}$/.test(username)) throw err(400, 'Username must be 3–32 chars: letters, numbers, . _ -');
   if (String(password || '').length < 6) throw err(400, 'Password must be at least 6 characters');
   if (users[username]) throw err(409, 'That username is taken');
+  if (Object.keys(users).length >= MAX_USERS) throw err(403, 'This server has reached its account limit');
   const salt = crypto.randomBytes(16).toString('hex');
   users[username] = { salt, hash: hashPw(password, salt), createdAt: Date.now() };
   writeJSON(usersFile, users);
@@ -169,6 +173,16 @@ function pullChanges(u, since) {
 
 function err(status, message) { const e = new Error(message); e.status = status; return e; }
 
+// Simple per-IP rate limiter for auth routes (brute-force + signup flooding).
+const authHits = new Map(); // ip -> { count, resetAt }
+function rateLimitAuth(ip) {
+  const now = Date.now();
+  let e = authHits.get(ip);
+  if (!e || now > e.resetAt) { e = { count: 0, resetAt: now + AUTH_WINDOW_MS }; authHits.set(ip, e); }
+  if (++e.count > AUTH_MAX) throw err(429, 'Too many attempts — wait a few minutes and try again');
+}
+setInterval(() => { const now = Date.now(); for (const [ip, e] of authHits) if (now > e.resetAt) authHits.delete(ip); }, AUTH_WINDOW_MS).unref();
+
 function send(res, status, obj) {
   const body = JSON.stringify(obj);
   res.writeHead(status, {
@@ -219,13 +233,15 @@ const MIME = {
   '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon',
 };
 function serveStatic(req, res, urlPath) {
-  let rel = decodeURIComponent(urlPath).replace(/\?.*$/, '');
+  let rel;
+  try { rel = decodeURIComponent(urlPath); } catch { res.writeHead(400); return res.end('Bad request'); }
   if (rel === '/') rel = '/index.html';
-  // prevent path traversal and never expose the server/ or data dirs
   const full = path.normalize(path.join(APP_DIR, rel));
-  if (!full.startsWith(APP_DIR) || full.startsWith(path.join(APP_DIR, 'server'))) {
-    res.writeHead(403); return res.end('Forbidden');
-  }
+  // relative path must stay inside APP_DIR (no traversal) and outside server/
+  const relCheck = path.relative(APP_DIR, full);
+  const escapes = relCheck.startsWith('..') || path.isAbsolute(relCheck);
+  const inServerDir = relCheck === 'server' || relCheck.startsWith('server' + path.sep);
+  if (escapes || inServerDir) { res.writeHead(403); return res.end('Forbidden'); }
   fs.readFile(full, (err, buf) => {
     if (err) { res.writeHead(404); return res.end('Not found'); }
     res.writeHead(200, { 'Content-Type': MIME[path.extname(full)] || 'application/octet-stream' });
@@ -240,7 +256,13 @@ const server = http.createServer(async (req, res) => {
     return send(res, 200, { ok: true, app: 'showtrack-sync', users: Object.keys(users).length });
   const route = routes[url];
   if (req.method === 'POST' && route) {
-    try { send(res, 200, await route(await readBody(req))); }
+    try {
+      if (url === '/api/register' || url === '/api/login') {
+        const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+        rateLimitAuth(ip);
+      }
+      send(res, 200, await route(await readBody(req)));
+    }
     catch (e) { send(res, e.status || 500, { error: e.message || 'Server error' }); }
     return;
   }
