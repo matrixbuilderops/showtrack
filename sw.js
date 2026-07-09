@@ -1,9 +1,9 @@
 // App-shell cache: the app works offline; TVmaze data and images load
 // network-first so nothing stale sticks around.
-const CACHE = 'showtrack-v4';
+const CACHE = 'showtrack-v5';
 const SHELL = [
   './', 'index.html', 'css/style.css',
-  'js/app.js', 'js/db.js', 'js/api.js', 'js/import.js', 'js/sync.js',
+  'js/app.js', 'js/db.js', 'js/api.js', 'js/import.js', 'js/sync.js', 'js/tmdb.js',
   'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png',
 ];
 

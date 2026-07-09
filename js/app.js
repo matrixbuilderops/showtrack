@@ -1,5 +1,6 @@
 import { db, kv, uuid, exportAll, importAll, local, migrateStamps } from './db.js';
 import { tvmaze, normalizeShow, normalizeEpisode, autoPlatform } from './api.js';
+import { tmdb, tmdbImg } from './tmdb.js';
 import { startImportUI } from './import.js';
 import { sync, registerAccount, loginAccount, signOut, syncNow, fetchAlerts, clearAlerts } from './sync.js';
 
@@ -291,8 +292,11 @@ async function renderShows() {
 // ---------- Search ----------
 
 let searchTimer = null;
+let searchMode = 'shows';
 async function doSearch(q) {
   if (!q.trim()) { $('#search-results').innerHTML = ''; return; }
+  if (searchMode === 'movies') return doMovieSearch(q.trim());
+
   let results;
   try { results = await tvmaze.search(q.trim()); }
   catch (e) { toast('Search failed — are you online?'); return; }
@@ -315,6 +319,53 @@ async function doSearch(q) {
       </div>
     </div>`;
   }).join('') || '<p class="muted center">No results.</p>';
+}
+
+async function doMovieSearch(q) {
+  if (!(await tmdb.hasKey())) {
+    $('#search-results').innerHTML = '<p class="muted center">Add your TMDB key in More → Settings to search movies.</p>';
+    return;
+  }
+  let data;
+  try { data = await tmdb.searchMovies(q); }
+  catch (e) { toast(e.message); return; }
+  const have = new Set((await db.all('movies')).map(m => m.tmdbId).filter(Boolean));
+  $('#search-results').innerHTML = (data.results || []).map(m => {
+    const year = (m.release_date || '').slice(0, 4);
+    const added = have.has(m.id);
+    return `
+    <div class="result-card">
+      <div class="poster" style="${imgCss(tmdbImg(m.poster_path, 'w185'))}"></div>
+      <div class="body">
+        <h3>${esc(m.title)}</h3>
+        <div class="sub">${[year, 'Movie'].filter(Boolean).join(' &middot; ')}</div>
+        <div class="sub">${esc((m.overview || '').slice(0, 90))}${m.overview && m.overview.length > 90 ? '…' : ''}</div>
+      </div>
+      <div class="actions">
+        <button class="follow-btn ${added ? 'following' : ''}" data-add-movie="${m.id}">
+          ${added ? 'Added' : '+ Add'}</button>
+      </div>
+    </div>`;
+  }).join('') || '<p class="muted center">No results.</p>';
+}
+
+async function addMovieFromTmdb(tmdbId, btn) {
+  const existing = (await db.all('movies')).find(m => m.tmdbId === tmdbId);
+  if (existing) { toast('Already in your movies'); return; }
+  // pull the search result data we already rendered, plus imdb id
+  let imdbId = null;
+  try { imdbId = (await tmdb.externalIds(tmdbId)).imdb_id || null; } catch {}
+  const title = btn.closest('.result-card').querySelector('h3').textContent;
+  const posterStyle = btn.closest('.result-card').querySelector('.poster').getAttribute('style') || '';
+  const posterMatch = posterStyle.match(/url\('([^']+)'\)/);
+  const movie = {
+    id: uuid(), tmdbId, imdbId, title,
+    poster: posterMatch ? decodeURIComponent(posterMatch[1]).replace('/w185', '/w342') : null,
+    watchedAt: null, progress: 0, rewatchCount: 0, platform: '', private: false, rating: null, source: 'tmdb',
+  };
+  await db.put('movies', movie);
+  toast(`Added "${title}"`);
+  queueSync();
 }
 
 async function followShow(tvmazeId) {
@@ -773,11 +824,19 @@ async function downloadBackup() {
 document.querySelectorAll('#tabbar .tab').forEach(t =>
   t.addEventListener('click', () => switchView(t.dataset.view)));
 
-document.querySelectorAll('.seg').forEach(s => s.addEventListener('click', () => {
-  document.querySelectorAll('.seg').forEach(x => x.classList.remove('active'));
+document.querySelectorAll('.seg[data-filter]').forEach(s => s.addEventListener('click', () => {
+  document.querySelectorAll('.seg[data-filter]').forEach(x => x.classList.remove('active'));
   s.classList.add('active');
   showsFilter = s.dataset.filter;
   renderShows();
+}));
+
+document.querySelectorAll('.seg[data-searchmode]').forEach(s => s.addEventListener('click', () => {
+  document.querySelectorAll('.seg[data-searchmode]').forEach(x => x.classList.remove('active'));
+  s.classList.add('active');
+  searchMode = s.dataset.searchmode;
+  $('#search-input').placeholder = searchMode === 'movies' ? 'Search movies…' : 'Search TV shows…';
+  doSearch($('#search-input').value);
 }));
 
 $('#platform-filter').addEventListener('change', (e) => {
@@ -799,6 +858,14 @@ document.body.addEventListener('click', async (ev) => {
     t.disabled = true;
     try { await followShow(id); t.textContent = 'Following'; t.classList.add('following'); queueSync(); }
     catch { toast('Could not follow — try again'); }
+    t.disabled = false;
+    return;
+  }
+  if (t.dataset.addMovie) {
+    const id = Number(t.dataset.addMovie);
+    t.disabled = true;
+    try { await addMovieFromTmdb(id, t); t.textContent = 'Added'; t.classList.add('following'); }
+    catch { toast('Could not add — try again'); }
     t.disabled = false;
     return;
   }
