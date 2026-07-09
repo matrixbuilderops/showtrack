@@ -153,12 +153,19 @@ export async function analyzeFiles(files) {
     }
   }
 
-  const episodes = [], movies = [], follows = [], watchlistMovies = [], unknown = [];
+  const episodes = [], movies = [], follows = [], watchlistMovies = [], unknown = [], netflix = [];
   const analyzed = [];
   for (const c of csvs) {
     if (c.json) { analyzed.push({ name: c.name, note: 'JSON file — kept for reference, not imported', rows: 0 }); continue; }
     const { headers, records } = parseCSV(c.text);
     if (!records.length) { analyzed.push({ name: c.name, note: 'empty', rows: 0 }); continue; }
+    // Netflix viewing-history export: exactly Title + Date columns
+    if (isNetflixCsv(headers)) {
+      const th = headers.find(h => /title/i.test(h)), dh = headers.find(h => /date/i.test(h));
+      for (const r of records) { const p = parseNetflixTitle(r[th]); if (p) { p.date = r[dh]; netflix.push(p); } }
+      analyzed.push({ name: c.name, rows: records.length, netflix: netflix.length });
+      continue;
+    }
     const f = detectFields(headers);
     const counts = { episode: 0, movie: 0, follow: 0, watchlistMovie: 0, unknown: 0 };
     for (const r of records) {
@@ -172,8 +179,30 @@ export async function analyzeFiles(files) {
     }
     analyzed.push({ name: c.name, rows: records.length, headers, fields: f, counts });
   }
-  return { analyzed, episodes, movies, follows, watchlistMovies, unknown };
+  return { analyzed, episodes, movies, follows, watchlistMovies, unknown, netflix };
 }
+
+// ---------- Netflix viewing-history parsing ----------
+
+function isNetflixCsv(headers) {
+  const h = headers.map(x => x.toLowerCase().trim());
+  return h.length === 2 && h.some(x => x === 'title') && h.some(x => x === 'date');
+}
+
+// "Series: Season 1: Episode Name" -> episode; "Movie Name" -> movie.
+// Netflix gives the episode NAME (no number), so we match by name later.
+function parseNetflixTitle(title) {
+  if (!title) return null;
+  const parts = title.split(':').map(s => s.trim()).filter(Boolean);
+  if (parts.length < 2) return { kind: 'movie', title: title.trim() };
+  const middle = parts.slice(1).join(' ');
+  const isEpisode = parts.length >= 3 || /season|chapter|episode|part|series|volume|book|limited/i.test(middle);
+  if (!isEpisode) return { kind: 'movie', title: title.trim() };
+  const sm = middle.match(/season\s+(\d+)/i);
+  return { kind: 'episode', series: parts[0], seasonNum: sm ? parseInt(sm[1], 10) : null, epName: parts[parts.length - 1] };
+}
+
+const normName = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
 function num(v) { const n = parseInt(v, 10); return Number.isFinite(n) ? n : null; }
 function isoDate(v) {
@@ -313,8 +342,68 @@ export async function runImport(plan, log, setProgress) {
   if (wlRows.length) await db.putMany('watchlist', wlRows);
   report.watchlistImported = wlRows.length;
 
+  // -- Netflix viewing history --
+  if (plan.netflix && plan.netflix.length) await importNetflix(plan.netflix, report, log, setProgress);
+
   await kv.set('import:lastReport', { ...report, at: new Date().toISOString() });
   return report;
+}
+
+// Best-effort: match Netflix rows (episode has a NAME but no number) to TVmaze
+// episodes by name, and tag everything watched as Netflix.
+async function importNetflix(rows, report, log, setProgress) {
+  report.netflixEpisodes = 0; report.netflixMovies = 0; report.netflixUnmatched = 0;
+  const bySeries = new Map();
+  const movies = [];
+  for (const r of rows) {
+    if (r.kind === 'movie') movies.push(r);
+    else (bySeries.get(r.series) || bySeries.set(r.series, []).get(r.series)).push(r);
+  }
+  log(`Netflix: ${bySeries.size} series, ${movies.length} movies. Matching…`);
+
+  let i = 0;
+  for (const [series, eps] of bySeries) {
+    setProgress(++i / (bySeries.size + 1));
+    let raw;
+    try { const res = await tvmaze.search(series); raw = res.length ? res[0].show : null; } catch { raw = null; }
+    if (!raw) { report.netflixUnmatched += eps.length; log(`? no match: ${series}`); continue; }
+
+    let show = await db.get('shows', raw.id);
+    if (!show) {
+      show = { ...normalizeShow(raw), followedAt: new Date().toISOString(), archived: false, lastEpisodeSync: null, platform: 'Netflix', private: false };
+      await db.put('shows', show);
+    } else if (!show.platform) { show.platform = 'Netflix'; await db.put('shows', show); }
+
+    let tvEps;
+    try { tvEps = (await tvmaze.episodes(raw.id)).map(e => normalizeEpisode(e, raw.id)); }
+    catch { report.netflixUnmatched += eps.length; continue; }
+    await db.putMany('episodes', tvEps);
+    const byName = new Map(tvEps.map(e => [normName(e.name) + '|' + e.season, e]));
+    const byNameAny = new Map(tvEps.map(e => [normName(e.name), e]));
+
+    const toWatch = [];
+    for (const r of eps) {
+      const key = normName(r.epName);
+      const ep = (r.seasonNum != null && byName.get(key + '|' + r.seasonNum)) || byNameAny.get(key);
+      if (!ep) { report.netflixUnmatched++; continue; }
+      toWatch.push({ epId: ep.id, showId: raw.id, watchedAt: isoDate(r.date) || new Date().toISOString(), progress: 100, source: 'netflix' });
+    }
+    if (toWatch.length) await db.putMany('watched', toWatch);
+    report.netflixEpisodes += toWatch.length;
+    log(`✓ ${raw.name}: ${toWatch.length}/${eps.length} episodes (Netflix)`);
+  }
+
+  // Netflix movies
+  const seen = new Set((await db.all('movies')).map(m => m.title));
+  const mRows = [];
+  for (const m of movies) {
+    if (seen.has(m.title)) continue;
+    seen.add(m.title);
+    mRows.push({ id: uuid(), title: m.title, imdbId: null, watchedAt: isoDate(m.date), progress: 100, rewatchCount: 0, platform: 'Netflix', private: false, source: 'netflix' });
+  }
+  if (mRows.length) await db.putMany('movies', mRows);
+  report.netflixMovies = mRows.length;
+  log(`Netflix done: ${report.netflixEpisodes} episodes, ${report.netflixMovies} movies, ${report.netflixUnmatched} unmatched.`);
 }
 
 // ---------- UI ----------
@@ -340,7 +429,8 @@ export async function startImportUI(files, container, { onDone, onBack }) {
 
   const totalEp = plan.episodes.length, totalMv = plan.movies.length,
         totalFo = plan.follows.length, totalUn = plan.unknown.length,
-        totalWl = (plan.watchlistMovies || []).length;
+        totalWl = (plan.watchlistMovies || []).length,
+        totalNf = (plan.netflix || []).length;
 
   container.innerHTML = `
     <button class="back-btn" id="imp-back">&#8592; Cancel</button>
@@ -354,9 +444,10 @@ export async function startImportUI(files, container, { onDone, onBack }) {
         <div class="stat"><div class="num">${totalMv}</div><div class="lbl">movie records</div></div>
         <div class="stat"><div class="num">${totalFo}</div><div class="lbl">followed shows</div></div>
         <div class="stat"><div class="num">${totalWl}</div><div class="lbl">watch-later movies</div></div>
+        ${totalNf ? `<div class="stat"><div class="num">${totalNf.toLocaleString()}</div><div class="lbl">Netflix history rows</div></div>` : ''}
         <div class="stat"><div class="num">${totalUn}</div><div class="lbl">unrecognized rows</div></div>
       </div>
-      ${totalEp + totalMv + totalFo === 0 ? `
+      ${totalEp + totalMv + totalFo + totalNf === 0 ? `
         <p style="margin-top:12px">Nothing recognizable found. The columns in your file may be different than expected — use "Copy column report" below and share it so the importer can be adapted.</p>
         <button class="big-btn" id="imp-cols" style="margin-top:10px">Copy column report</button>` : `
         <button class="big-btn accent" id="imp-go" style="margin-top:14px">Start import</button>

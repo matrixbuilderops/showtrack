@@ -66,6 +66,8 @@ async function checkUser(u, st, helpers) {
   const key = kvGet(st.records, 'settings:rapidApiKey', '');
   const mode = kvGet(st.records, 'settings:availMode', 'app');
   if (!key || (mode !== 'background' && mode !== 'both')) return;
+  const owned = (kvGet(st.records, 'settings:myPlatforms', []) || []).map(p => String(p).toLowerCase());
+  const isOwned = (name) => owned.some(p => name.toLowerCase().includes(p) || p.includes(name.toLowerCase()));
 
   const now = Date.now();
   const shows = currentlyWatching(st, now)
@@ -98,12 +100,15 @@ async function checkUser(u, st, helpers) {
       const stillThere = opts.some(o => o.service.name.toLowerCase().includes(show.platform.toLowerCase())
         || show.platform.toLowerCase().includes(o.service.id));
       if (!stillThere) {
-        const elsewhere = [...new Set(opts.filter(o => o.type === 'subscription').map(o => o.service.name))];
+        const subs = [...new Set(opts.filter(o => o.type === 'subscription').map(o => o.service.name))];
+        // prefer services the user actually pays for
+        const yours = subs.filter(isOwned);
+        const elsewhere = yours.length ? yours : subs;
         st.alerts.push({
           showId: show.id, name: show.name, kind: 'left',
           service: show.platform,
           message: elsewhere.length
-            ? `${show.name} left ${show.platform} — now on ${elsewhere.join(', ')}`
+            ? `${show.name} left ${show.platform} — ${yours.length ? 'you can watch it on' : 'now on'} ${elsewhere.join(', ')}`
             : `${show.name} left ${show.platform} — not on any subscription now`,
           at: Date.now(),
         });
