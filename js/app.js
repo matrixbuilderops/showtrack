@@ -120,6 +120,7 @@ function render(name) {
   else if (name === 'shows') renderShows();
   else if (name === 'more') renderMore();
   else if (name === 'detail') renderDetail(currentShowId);
+  else if (name === 'search') doSearch($('#search-input').value);
 }
 
 // ---------- data assembly ----------
@@ -294,7 +295,7 @@ async function renderShows() {
 let searchTimer = null;
 let searchMode = 'shows';
 async function doSearch(q) {
-  if (!q.trim()) { $('#search-results').innerHTML = ''; return; }
+  if (!q.trim()) { renderRecommendations(); return; }
   if (searchMode === 'movies') return doMovieSearch(q.trim());
 
   let results;
@@ -347,6 +348,70 @@ async function doMovieSearch(q) {
       </div>
     </div>`;
   }).join('') || '<p class="muted center">No results.</p>';
+}
+
+// ---------- recommendations (empty-search "Discover") ----------
+
+async function renderRecommendations() {
+  const box = $('#search-results');
+  if (!(await tmdb.hasKey())) {
+    box.innerHTML = `<p class="muted center" style="padding:30px 16px">Search ${searchMode === 'movies' ? 'movies' : 'TV shows'} above.<br><span class="small">Add a TMDB key in More → Settings to get recommendations here.</span></p>`;
+    return;
+  }
+  box.innerHTML = '<p class="muted center" style="padding:24px">Finding things you might like…</p>';
+  try {
+    if (searchMode === 'movies') {
+      const movies = (await db.all('movies')).filter(m => m.tmdbId && !isHidden(m));
+      if (!movies.length) { box.innerHTML = '<p class="muted center" style="padding:24px">Add a movie (via Movies search) and I\'ll recommend more like it.</p>'; return; }
+      const seed = movies[Math.floor(Math.random() * movies.length)];
+      const recs = (await tmdb.movieRecs(seed.tmdbId)).results || [];
+      const have = new Set(movies.map(m => m.tmdbId));
+      box.innerHTML = `<p class="muted small" style="margin-bottom:10px">More like <b>${esc(seed.title)}</b></p>` +
+        recs.filter(m => !have.has(m.id)).slice(0, 12).map(m => movieCard(m)).join('') || '<p class="muted center">No recommendations right now.</p>';
+    } else {
+      const shows = (await db.all('shows')).filter(s => s.imdbId && !s.archived && !isHidden(s));
+      if (!shows.length) { box.innerHTML = '<p class="muted center" style="padding:24px">Follow a show first, and I\'ll recommend more.</p>'; return; }
+      const seed = shows[Math.floor(Math.random() * shows.length)];
+      const found = await tmdb.findByImdb(seed.imdbId);
+      const tvId = found.tv_results && found.tv_results[0] && found.tv_results[0].id;
+      if (!tvId) { box.innerHTML = '<p class="muted center" style="padding:24px">No recommendations for these shows yet — try searching.</p>'; return; }
+      const recs = (await tmdb.tvRecs(tvId)).results || [];
+      box.innerHTML = `<p class="muted small" style="margin-bottom:10px">Because you watch <b>${esc(seed.name)}</b></p>` +
+        (recs.slice(0, 12).map(t => `
+          <div class="result-card">
+            <div class="poster" style="${imgCss(tmdbImg(t.poster_path, 'w185'))}"></div>
+            <div class="body">
+              <h3>${esc(t.name)}</h3>
+              <div class="sub">${[(t.first_air_date || '').slice(0, 4), 'TV'].filter(Boolean).join(' &middot; ')}</div>
+              <div class="sub">${esc((t.overview || '').slice(0, 90))}${t.overview && t.overview.length > 90 ? '…' : ''}</div>
+            </div>
+            <div class="actions"><button class="follow-btn" data-follow-name="${esc(t.name)}">+ Follow</button></div>
+          </div>`).join('') || '<p class="muted center">No recommendations right now.</p>');
+    }
+  } catch (e) { box.innerHTML = '<p class="muted center" style="padding:24px">Couldn\'t load recommendations.</p>'; }
+}
+
+function movieCard(m) {
+  const year = (m.release_date || '').slice(0, 4);
+  return `
+    <div class="result-card">
+      <div class="poster" style="${imgCss(tmdbImg(m.poster_path, 'w185'))}"></div>
+      <div class="body">
+        <h3>${esc(m.title)}</h3>
+        <div class="sub">${[year, 'Movie'].filter(Boolean).join(' &middot; ')}</div>
+        <div class="sub">${esc((m.overview || '').slice(0, 90))}${m.overview && m.overview.length > 90 ? '…' : ''}</div>
+      </div>
+      <div class="actions"><button class="follow-btn" data-add-movie="${m.id}">+ Add</button></div>
+    </div>`;
+}
+
+async function followByName(name, btn) {
+  try {
+    const res = await tvmaze.search(name);
+    if (!res.length) { toast('Not found on TVmaze'); return; }
+    await followShow(res[0].show.id);
+    btn.textContent = 'Following'; btn.classList.add('following'); queueSync();
+  } catch { toast('Could not follow'); }
 }
 
 async function addMovieFromTmdb(tmdbId, btn) {
@@ -972,6 +1037,12 @@ document.body.addEventListener('click', async (ev) => {
     t.disabled = true;
     try { await addMovieFromTmdb(id, t); t.textContent = 'Added'; t.classList.add('following'); }
     catch { toast('Could not add — try again'); }
+    t.disabled = false;
+    return;
+  }
+  if (t.dataset.followName) {
+    t.disabled = true;
+    await followByName(t.dataset.followName, t);
     t.disabled = false;
     return;
   }

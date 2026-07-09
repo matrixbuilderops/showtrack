@@ -25,4 +25,8 @@ export const tmdb = {
   hasKey: async () => !!(await getKey()),
   searchMovies: (q) => tmdbGet('/search/movie', { query: q, include_adult: 'true' }),
   externalIds: (id) => tmdbGet(`/movie/${id}/external_ids`),
+  movieRecs: (id) => tmdbGet(`/movie/${id}/recommendations`),
+  tvRecs: (id) => tmdbGet(`/tv/${id}/recommendations`),
+  // resolve an imdb id (ttXXXXXXX) to a TMDB tv/movie result
+  findByImdb: (imdbId) => tmdbGet(`/find/${imdbId}`, { external_source: 'imdb_id' }),
 };
