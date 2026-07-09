@@ -17,7 +17,7 @@ const path = require('path');
 const PORT = parseInt(process.env.PORT || '8570', 10);
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const PAGE_LIMIT = 4000;          // records per pull page
-const MAX_BODY = 64 * 1024 * 1024; // 64 MB per request
+const MAX_BODY = 8 * 1024 * 1024;  // 8 MB per request (client chunks ≤5000 records ≈ 1–2 MB)
 const MAX_USERS = parseInt(process.env.MAX_USERS || '50', 10); // cap accounts (disk-fill DoS)
 const AUTH_MAX = 20;              // auth attempts per IP per window (brute-force / signup flood)
 const AUTH_WINDOW_MS = 10 * 60 * 1000;
@@ -36,25 +36,30 @@ function writeJSON(f, obj) {
   fs.writeFileSync(tmp, JSON.stringify(obj));
   fs.renameSync(tmp, f);
 }
+// Null-prototype maps: any client-controlled key (token, username, record id,
+// kv key) can't reach inherited props like "toString"/"constructor", so a
+// bogus token can't impersonate a user and a pushed id of "__proto__" can't
+// pollute prototypes. readMap() loads a JSON object as one of these.
+const nullMap = (src) => Object.assign(Object.create(null), src || {});
+const readMap = (f) => nullMap(readJSON(f, {}));
 
-let users = readJSON(usersFile, {});     // username -> {salt, hash, createdAt}
-let tokens = readJSON(tokensFile, {});   // token -> username
+let users = readMap(usersFile);     // username -> {salt, hash, createdAt}
+let tokens = readMap(tokensFile);   // token -> username
 
 // per-user in-memory state, lazily loaded
-const cache = {}; // username -> { records:{store:{id:rec}}, tombstones:{store:{id:{_t,_seq}}}, seq, alerts, lastCheck }
+const cache = Object.create(null); // username -> state
 
 function userDir(u) { return path.join(DATA_DIR, 'u_' + encodeURIComponent(u)); }
 
 function loadUser(u) {
   if (cache[u]) return cache[u];
   const dir = userDir(u);
-  const state = { records: {}, tombstones: {}, seq: 0, alerts: [], lastCheck: {} };
-  for (const s of STORES) state.records[s] = readJSON(path.join(dir, s + '.json'), {});
+  const state = { records: Object.create(null), tombstones: Object.create(null), seq: 0, alerts: [], lastCheck: {} };
+  for (const s of STORES) state.records[s] = readMap(path.join(dir, s + '.json'));
   const meta = readJSON(path.join(dir, 'meta.json'), { seq: 0, tombstones: {}, lastCheck: {} });
   state.seq = meta.seq || 0;
-  state.tombstones = meta.tombstones || {};
   state.lastCheck = meta.lastCheck || {};
-  for (const s of STORES) state.tombstones[s] = state.tombstones[s] || {};
+  for (const s of STORES) state.tombstones[s] = nullMap(meta.tombstones && meta.tombstones[s]);
   state.alerts = readJSON(path.join(dir, 'alerts.json'), []);
   cache[u] = state;
   return state;
@@ -102,7 +107,8 @@ function newToken(username) {
   return token;
 }
 function userFor(token) {
-  const u = tokens[token];
+  // token must be a string; null-proto `tokens` prevents inherited-key lookups
+  const u = typeof token === 'string' ? tokens[token] : undefined;
   if (!u) throw err(401, 'Not signed in — sign in again');
   return u;
 }
@@ -195,10 +201,18 @@ function send(res, status, obj) {
 }
 
 function readBody(req) {
+  // reject an oversized declared body before reading a single byte
+  const declared = parseInt(req.headers['content-length'] || '0', 10);
+  if (declared > MAX_BODY) return Promise.reject(err(413, 'Body too large'));
   return new Promise((resolve, reject) => {
-    let size = 0; const chunks = [];
-    req.on('data', c => { size += c.length; if (size > MAX_BODY) { reject(err(413, 'Body too large')); req.destroy(); } else chunks.push(c); });
-    req.on('end', () => { try { resolve(chunks.length ? JSON.parse(Buffer.concat(chunks)) : {}); } catch { reject(err(400, 'Bad JSON')); } });
+    let size = 0, aborted = false; const chunks = [];
+    req.on('data', c => {
+      if (aborted) return;
+      size += c.length;
+      if (size > MAX_BODY) { aborted = true; reject(err(413, 'Body too large')); req.destroy(); }
+      else chunks.push(c);
+    });
+    req.on('end', () => { if (aborted) return; try { resolve(chunks.length ? JSON.parse(Buffer.concat(chunks)) : {}); } catch { reject(err(400, 'Bad JSON')); } });
     req.on('error', reject);
   });
 }
@@ -208,8 +222,9 @@ const routes = {
   '/api/login': (b) => ({ token: login(b.username, b.password), username: String(b.username).trim().toLowerCase() }),
   '/api/push': (b) => {
     const u = userFor(b.token);
+    if (!STORES.includes(b.store)) throw err(400, 'Unknown store');
     const changed = mergeBatch(u, b.store, b.records, b.deletes);
-    if (changed && STORES.includes(b.store)) persistUser(u, [b.store]);
+    if (changed) persistUser(u, [b.store]);
     return { ok: true, seq: loadUser(u).seq };
   },
   '/api/pull': (b) => { const u = userFor(b.token); return pullChanges(u, b.since || 0); },
@@ -258,7 +273,10 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'POST' && route) {
     try {
       if (url === '/api/register' || url === '/api/login') {
-        const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+        // socket address can't be spoofed; only trust X-Forwarded-For behind a
+        // proxy you control (set TRUST_PROXY=1, e.g. tailscale serve)
+        const ip = (process.env.TRUST_PROXY === '1' && (req.headers['x-forwarded-for'] || '').split(',')[0].trim())
+          || req.socket.remoteAddress || 'unknown';
         rateLimitAuth(ip);
       }
       send(res, 200, await route(await readBody(req)));
