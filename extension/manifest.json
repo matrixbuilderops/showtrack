@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "ShowTrack Scrobbler",
+  "version": "1.0",
+  "description": "Auto-marks the episodes you watch on streaming sites into your ShowTrack app.",
+  "permissions": ["storage", "activeTab"],
+  "optional_host_permissions": ["*://*/*"],
+  "host_permissions": [
+    "*://*.netflix.com/*",
+    "*://*.crunchyroll.com/*",
+    "*://*.hulu.com/*",
+    "*://*.disneyplus.com/*",
+    "*://*.max.com/*",
+    "*://*.primevideo.com/*",
+    "*://*.amazon.com/*"
+  ],
+  "action": { "default_popup": "popup.html", "default_title": "ShowTrack" },
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.netflix.com/*",
+        "*://*.crunchyroll.com/*",
+        "*://*.hulu.com/*",
+        "*://*.disneyplus.com/*",
+        "*://*.max.com/*",
+        "*://*.primevideo.com/*",
+        "*://*.amazon.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "icons": { "48": "icon48.png", "128": "icon128.png" }
+}

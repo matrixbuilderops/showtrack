@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { width: 260px; font-family: -apple-system, system-ui, sans-serif; margin: 0; padding: 16px; background: #0e1420; color: #e8edf5; }
+  h1 { font-size: 1rem; margin: 0 0 12px; }
+  label { display: block; font-size: 0.78rem; color: #8b98ab; margin-bottom: 8px; }
+  input { display: block; width: 100%; box-sizing: border-box; margin-top: 4px; padding: 8px; border-radius: 8px; border: 1px solid #263248; background: #202b3d; color: #e8edf5; font-size: 0.85rem; }
+  button { width: 100%; padding: 10px; margin-top: 10px; border: none; border-radius: 8px; background: #ffb020; color: #1a1200; font-weight: 700; font-size: 0.9rem; cursor: pointer; }
+  button.ghost { background: #202b3d; color: #e8edf5; }
+  #status { font-size: 0.8rem; color: #3ddc84; margin-top: 10px; min-height: 1em; }
+  .hidden { display: none; }
+  .muted { color: #8b98ab; font-size: 0.72rem; }
+</style>
+</head>
+<body>
+  <h1>ShowTrack Scrobbler</h1>
+  <div id="signedout">
+    <label>Server address<input id="server" type="url" placeholder="https://your-desktop.ts.net"></label>
+    <label>Username<input id="user" type="text" autocomplete="username"></label>
+    <label>Password<input id="pass" type="password" autocomplete="current-password"></label>
+    <button id="signin">Sign in</button>
+    <p class="muted">Same account as the ShowTrack app. While you watch on Netflix, Crunchyroll and more, episodes auto-mark into your app.</p>
+  </div>
+  <div id="signedin" class="hidden">
+    <p id="who"></p>
+    <p class="muted">Scrobbling is on. Keep watching — episodes mark themselves at ~92% watched.</p>
+    <button id="signout" class="ghost">Sign out</button>
+  </div>
+  <div id="status"></div>
+  <script src="popup.js"></script>
+</body>
+</html>

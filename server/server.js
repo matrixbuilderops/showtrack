@@ -228,6 +228,13 @@ const routes = {
     return { ok: true, seq: loadUser(u).seq };
   },
   '/api/pull': (b) => { const u = userFor(b.token); return pullChanges(u, b.since || 0); },
+  '/api/scrobble': async (b) => {
+    const u = userFor(b.token);
+    const st = loadUser(u);
+    const r = await require('./scrobble.js').handleScrobble(st, b, () => ++st.seq);
+    if (r.ok) persistUser(u, ['shows', 'episodes', 'watched']);
+    return r;
+  },
   '/api/alerts': (b) => {
     const u = userFor(b.token);
     const st = loadUser(u);
