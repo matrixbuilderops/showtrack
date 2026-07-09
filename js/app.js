@@ -420,12 +420,13 @@ async function setEpProgress(epId, showId, progress) {
 async function bumpEpRewatch(epId, showId) {
   const prev = await db.get('watched', epId);
   const ts = new Date().toISOString();
+  const keepDates = await kv.get('settings:recordRewatchDates', true);
   await db.put('watched', {
     epId, showId,
     watchedAt: ts,
     progress: 100,
     rewatchCount: wRe(prev) + 1,
-    rewatches: [...(prev?.rewatches || []), ts], // each rewatch keeps its date
+    rewatches: keepDates ? [...(prev?.rewatches || []), ts] : (prev?.rewatches || []),
     source: 'app',
   });
 }
@@ -472,7 +473,14 @@ async function fetchAvailability(show) {
   return data;
 }
 
-function showAvailabilitySheet(show, data) {
+// does a streaming-option service match one of the user's paid subscriptions?
+function serviceOwned(opt, owned) {
+  const name = (opt.service.name || '').toLowerCase();
+  const id = (opt.service.id || '').toLowerCase();
+  return owned.some(p => { const pl = p.toLowerCase(); return name.includes(pl) || pl.includes(name) || pl.includes(id); });
+}
+
+function showAvailabilitySheet(show, data, owned = []) {
   const el = $('#sheet');
   const opts = (data && data.streamingOptions && data.streamingOptions.us) || [];
   const seen = new Set();
@@ -481,14 +489,16 @@ function showAvailabilitySheet(show, data) {
     const k = o.service.id + ':' + o.type;
     if (seen.has(k)) continue;
     seen.add(k);
+    o._owned = serviceOwned(o, owned);
     rows.push(o);
   }
-  rows.sort((a, b) => (a.type === 'subscription' ? 0 : 1) - (b.type === 'subscription' ? 0 : 1));
+  // yours first, then subscriptions, then the rest
+  rows.sort((a, b) => (b._owned - a._owned) || ((a.type === 'subscription' ? 0 : 1) - (b.type === 'subscription' ? 0 : 1)));
   el.innerHTML = `<div class="sheet-card">
     <h3>Where to watch \u2014 ${esc(show.name)}</h3>
     ${rows.length ? rows.map(o => `
       <div class="avail-row">
-        <span class="svc">${esc(o.service.name)}</span>
+        <span class="svc">${esc(o.service.name)}${o._owned ? ' <span class="owned">\u2713 yours</span>' : ''}</span>
         <span>
           <span class="kind ${o.type === 'subscription' ? 'sub' : ''}">${esc(o.type)}</span>
           ${o.expiresSoon ? `<span class="leaving">\u26a0 leaving${o.expiresOn ? ' ' + new Date(o.expiresOn * 1000).toLocaleDateString() : ' soon'}</span>` : ''}
@@ -565,6 +575,7 @@ async function renderDetail(showId) {
         <div class="detail-actions">
           <button class="pill-btn" id="detail-platform">&#128250; ${show.platform ? esc(show.platform) : 'Set platform'}</button>
           <button class="pill-btn" id="detail-avail">&#128225; Where to watch</button>
+          <button class="pill-btn" id="detail-addlist">&#43; Add to list</button>
           <button class="pill-btn" id="detail-sync">&#8635; Update episodes</button>
           <button class="pill-btn" id="detail-archive">${show.archived ? '&#9654; Resume watching' : '&#9208; Stop watching'}</button>
           <button class="pill-btn" id="detail-private">${show.private ? '&#128275; Unmark private' : '&#128274; Make private'}</button>
@@ -587,9 +598,11 @@ async function renderDetail(showId) {
     toast('Checking availability\u2026');
     try {
       const data = await fetchAvailability(show);
-      if (data !== null || await kv.get('settings:rapidApiKey', '')) showAvailabilitySheet(show, data);
+      const owned = await kv.get('settings:myPlatforms', []);
+      if (data !== null || await kv.get('settings:rapidApiKey', '')) showAvailabilitySheet(show, data, owned);
     } catch (e) { toast('Availability check failed'); }
   };
+  $('#detail-addlist').onclick = () => addToList({ type: 'series', tvmazeId: show.id, tvdbId: show.tvdbId, title: show.name });
   $('#detail-sync').onclick = async () => {
     toast('Updating…');
     try { await syncShowEpisodes(showId); toast('Episodes updated'); renderDetail(showId); }
@@ -739,8 +752,13 @@ async function renderMore() {
     const badge = pr > 0 && pr < 100 ? ` <span class="pct-badge">${pr}%</span>`
       : r > 0 ? ` <span class="pct-badge re">×${r + 1}</span>` : '';
     return `
-    <div class="simple-row" data-movie="${m.id}"><span>${m.private ? '&#128274; ' : ''}${esc(m.title)}${badge}${m.platform ? ` <span class="muted small">${esc(m.platform)}</span>` : ''}</span>
-      <span class="when">${m.watchedAt ? fmtDate(m.watchedAt) : 'not watched'}</span></div>`;
+    <div class="movie-row" data-movie="${m.id}">
+      <div class="mini-poster" style="${imgCss(m.poster)}"></div>
+      <div class="mr-body">
+        <div class="mr-title">${m.private ? '&#128274; ' : ''}${esc(m.title)}${badge}</div>
+        <div class="mr-sub">${m.watchedAt ? fmtDate(m.watchedAt) : 'not watched'}${m.platform ? ' &middot; ' + esc(m.platform) : ''}</div>
+      </div>
+    </div>`;
   }).join('') || '<p class="muted small">No movies yet — import TV Time, or add one manually below.</p>';
   if (visMovies.length > 15)
     $('#movies-list').innerHTML += `<p class="muted small center">…and ${visMovies.length - 15} more</p>`;
@@ -755,13 +773,14 @@ async function renderMore() {
       ...(wProg(m) >= 100 ? [{ label: `↻ Watched again (×${wRe(m) + 2})`, value: 'rewatch' }] : []),
       { label: '◐ Partially watched…', value: 'partial' },
       { label: '📺 Set platform', value: 'platform' },
+      { label: '＋ Add to list', value: 'addlist' },
       { label: m.private ? '🔓 Unmark private' : '🔒 Make private', value: 'private' },
       { label: '✕ Not watched', value: 'unwatch' },
       { label: 'Delete', value: 'delete', danger: true },
     ]);
     if (!action) return;
     if (action === 'watched') { m.progress = 100; m.watchedAt = new Date().toISOString(); }
-    else if (action === 'rewatch') { const ts = new Date().toISOString(); m.progress = 100; m.rewatchCount = wRe(m) + 1; m.rewatches = [...(m.rewatches || []), ts]; m.watchedAt = ts; }
+    else if (action === 'rewatch') { const ts = new Date().toISOString(); const keep = await kv.get('settings:recordRewatchDates', true); m.progress = 100; m.rewatchCount = wRe(m) + 1; if (keep) m.rewatches = [...(m.rewatches || []), ts]; m.watchedAt = ts; }
     else if (action === 'partial') {
       const n = askPercent(wProg(m));
       if (n === null) return;
@@ -773,6 +792,7 @@ async function renderMore() {
       m.platform = v;
     }
     else if (action === 'private') { m.private = !m.private; }
+    else if (action === 'addlist') { await addToList({ type: 'movie', tmdbId: m.tmdbId, imdbId: m.imdbId, title: m.title }); return; }
     else if (action === 'unwatch') { m.progress = 0; m.watchedAt = null; m.rewatchCount = 0; }
     else if (action === 'delete') {
       if (!confirm(`Delete "${m.title}"?`)) return;
@@ -785,18 +805,25 @@ async function renderMore() {
   };
 
   $('#lists-list').innerHTML = lists.map(l => `
-    <details class="list-block">
+    <details class="list-block" data-list="${l.id}">
       <summary>${esc(l.name)} <span class="muted small">${(l.items || []).length} items</span></summary>
-      ${(l.items || []).map(i => `
-      <div class="simple-row"><span>${esc(i.title || '#' + (i.tvdbId ?? '?'))}</span>
-        <span class="when">${esc(i.type || '')}</span></div>`).join('')}
+      <div class="list-actions">
+        <button class="pill-btn" data-list-rename="${l.id}">Rename</button>
+        <button class="pill-btn warn" data-list-delete="${l.id}">Delete list</button>
+      </div>
+      ${(l.items || []).map((i, idx) => `
+      <div class="simple-row"><span>${i.private ? '&#128274; ' : ''}${esc(i.title || '#' + (i.tvdbId ?? i.tmdbId ?? '?'))}</span>
+        <button class="mini-x" data-list-remove="${l.id}" data-idx="${idx}" aria-label="Remove">&times;</button></div>`).join('')
+        || '<p class="muted small" style="padding:8px 0">Empty — add shows/movies from their page.</p>'}
     </details>`).join('')
-    || '<p class="muted small">No lists yet (custom lists import from TV Time).</p>';
+    || '<p class="muted small">No lists yet. Make one below, or they import from TV Time.</p>';
 
   $('#set-tmdb').value = await kv.get('settings:tmdbKey', '');
   $('#set-rapid').value = await kv.get('settings:rapidApiKey', '');
   $('#set-tvdb').value = await kv.get('settings:tvdbKey', '');
   $('#set-availmode').value = await kv.get('settings:availMode', 'app');
+  $('#set-rewatchdates').checked = await kv.get('settings:recordRewatchDates', true);
+  await renderMyPlatforms();
   renderSyncUI();
   renderAlerts();
 
@@ -843,6 +870,85 @@ $('#platform-filter').addEventListener('change', (e) => {
   platformFilter = e.target.value;
   renderShows();
 });
+
+// ---------- my streaming services (subscriptions) ----------
+
+async function renderMyPlatforms() {
+  const mine = new Set(await kv.get('settings:myPlatforms', []));
+  const used = await usedPlatforms();
+  const all = [...new Set([...PLATFORM_DEFAULTS, ...used, ...mine])];
+  $('#my-platforms').innerHTML = all.map(p =>
+    `<button class="chip ${mine.has(p) ? 'on' : ''}" data-plat="${esc(p)}">${esc(p)}</button>`).join('') +
+    `<button class="chip" data-plat-new="1">＋ Other…</button>`;
+}
+$('#my-platforms').addEventListener('click', async (ev) => {
+  const t = ev.target.closest('[data-plat], [data-plat-new]');
+  if (!t) return;
+  const mine = new Set(await kv.get('settings:myPlatforms', []));
+  if (t.dataset.platNew) {
+    const p = (prompt('Streaming service name:') || '').trim();
+    if (p) mine.add(p);
+  } else {
+    const p = t.dataset.plat;
+    mine.has(p) ? mine.delete(p) : mine.add(p);
+  }
+  await kv.set('settings:myPlatforms', [...mine]);
+  await renderMyPlatforms();
+  queueSync();
+});
+
+// ---------- list management ----------
+
+$('#btn-new-list').addEventListener('click', async () => {
+  const name = (prompt('Name your new list:') || '').trim();
+  if (!name) return;
+  await db.put('lists', { id: uuid(), name, isPublic: false, createdAt: new Date().toISOString(), items: [] });
+  toast(`List "${name}" created`);
+  renderMore(); queueSync();
+});
+$('#lists-list').addEventListener('click', async (ev) => {
+  const t = ev.target;
+  if (t.dataset.listRename) {
+    ev.preventDefault();
+    const l = await db.get('lists', t.dataset.listRename);
+    const name = (prompt('Rename list:', l.name) || '').trim();
+    if (name) { l.name = name; await db.put('lists', l); renderMore(); queueSync(); }
+  } else if (t.dataset.listDelete) {
+    ev.preventDefault();
+    const l = await db.get('lists', t.dataset.listDelete);
+    if (confirm(`Delete the list "${l.name}"? (the shows themselves stay)`)) {
+      await db.del('lists', t.dataset.listDelete); renderMore(); queueSync();
+    }
+  } else if (t.dataset.listRemove) {
+    ev.preventDefault();
+    const l = await db.get('lists', t.dataset.listRemove);
+    l.items.splice(Number(t.dataset.idx), 1);
+    await db.put('lists', l); renderMore(); queueSync();
+  }
+});
+
+// add a show or movie to one of your lists (from a detail page)
+async function addToList(item) {
+  const lists = await db.all('lists');
+  const opts = lists.map(l => ({ label: l.name + ` (${(l.items || []).length})`, value: l.id }));
+  opts.push({ label: '＋ New list…', value: '__new__' });
+  let choice = await sheet('Add to which list?', opts);
+  if (!choice) return;
+  let list;
+  if (choice === '__new__') {
+    const name = (prompt('Name your new list:') || '').trim();
+    if (!name) return;
+    list = { id: uuid(), name, isPublic: false, createdAt: new Date().toISOString(), items: [] };
+  } else {
+    list = await db.get('lists', choice);
+  }
+  list.items = list.items || [];
+  if (list.items.some(i => i.title === item.title)) { toast('Already in that list'); return; }
+  list.items.push(item);
+  await db.put('lists', list);
+  toast(`Added to "${list.name}"`);
+  queueSync();
+}
 
 $('#search-input').addEventListener('input', (e) => {
   clearTimeout(searchTimer);
@@ -921,6 +1027,7 @@ $('#btn-save-settings').addEventListener('click', async () => {
   await kv.set('settings:tmdbKey', $('#set-tmdb').value.trim());
   await kv.set('settings:rapidApiKey', $('#set-rapid').value.trim());
   await kv.set('settings:tvdbKey', $('#set-tvdb').value.trim());
+  await kv.set('settings:recordRewatchDates', $('#set-rewatchdates').checked);
   toast('Settings saved');
   queueSync();
 });

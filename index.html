@@ -113,8 +113,14 @@
       <button id="btn-private" class="big-btn">&#128274; Private items: <b>hidden</b> &mdash; tap to show</button>
     </div>
     <div class="panel">
+      <h2>My streaming services</h2>
+      <p class="muted small">Tap the ones you pay for. Availability and "leaving soon" alerts highlight these first.</p>
+      <div id="my-platforms" class="chip-row"></div>
+    </div>
+    <div class="panel">
       <h2>Settings</h2>
-      <label class="set-label">TMDB API key
+      <label class="set-toggle"><input id="set-rewatchdates" type="checkbox" checked> Record the date of each rewatch</label>
+      <label class="set-label" style="margin-top:12px">TMDB API key
         <input id="set-tmdb" type="password" autocomplete="off" placeholder="not set"></label>
       <label class="set-label">RapidAPI key (streaming availability)
         <input id="set-rapid" type="password" autocomplete="off" placeholder="not set"></label>
@@ -138,6 +144,7 @@
     <div class="panel">
       <h2>Lists</h2>
       <div id="lists-list"></div>
+      <button id="btn-new-list" class="big-btn" style="margin-top:10px">&#65291; New list</button>
     </div>
     <div class="panel">
       <h2>Watchlist</h2>

@@ -242,6 +242,21 @@ a { color: var(--accent); }
 .empty .empty-icon { font-size: 3rem; margin-bottom: 10px; }
 
 .set-label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 10px; }
+.set-toggle { display: flex; align-items: center; gap: 10px; font-size: 0.92rem; cursor: pointer; }
+.set-toggle input { width: 20px; height: 20px; accent-color: var(--accent); }
+.chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip {
+  border: 1px solid var(--line); background: var(--bg3); color: var(--muted);
+  padding: 8px 14px; border-radius: 999px; font-size: 0.85rem; font-weight: 600; cursor: pointer;
+}
+.chip.on { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+.avail-row .owned { color: var(--good); font-size: 0.72rem; font-weight: 700; }
+.movie-row { display: flex; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); cursor: pointer; }
+.movie-row:last-child { border-bottom: none; }
+.movie-row .mini-poster { width: 40px; height: 60px; flex: none; border-radius: 6px; background: var(--bg3) center/cover no-repeat; }
+.movie-row .mr-body { flex: 1; min-width: 0; }
+.movie-row .mr-title { font-size: 0.92rem; font-weight: 600; }
+.movie-row .mr-sub { font-size: 0.78rem; color: var(--muted); margin-top: 2px; }
 .set-label input {
   display: block; width: 100%; margin-top: 5px; padding: 11px 12px;
   background: var(--bg3); color: var(--fg);
@@ -259,6 +274,9 @@ a { color: var(--accent); }
 
 .list-block { padding: 4px 0; }
 .list-block summary { cursor: pointer; font-weight: 600; padding: 8px 0; font-size: 0.95rem; }
+.list-actions { display: flex; gap: 8px; padding: 6px 0 10px; }
+.mini-x { background: none; border: none; color: var(--muted); font-size: 1.3rem; line-height: 1; cursor: pointer; padding: 0 6px; }
+.mini-x:active { color: var(--danger); }
 
 /* ---------- action sheet ---------- */
 #sheet {
