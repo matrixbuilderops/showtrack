@@ -9,7 +9,7 @@ This guide explains how to set up your desktop computer, install the browser ext
 ## Part 1: Desktop Setup (Server & Extension)
 
 ### 1. Run the Sync Server
-The server stores a secure, encrypted copy of your data so your devices stay in sync, and performs background checks for shows leaving streaming services.
+The server stores a private copy of your data so your devices stay in sync, and performs background checks for shows leaving streaming services. (Passwords are salted + hashed; keep the server on your own trusted network / Tailscale rather than the public internet.)
 
 1. Clone this repository on your desktop/server machine:
    ```bash
