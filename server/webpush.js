@@ -28,9 +28,54 @@ function loadOrCreateVapid(dataDir) {
   const ecdh = crypto.createECDH('prime256v1');
   ecdh.generateKeys();
   const keys = { publicKey: b64uEnc(ecdh.getPublicKey()), privateKey: b64uEnc(ecdh.getPrivateKey()) };
-  fs.mkdirSync(dataDir, { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(keys));
+  fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  // VAPID private key is a secret — owner-only
+  fs.writeFileSync(file, JSON.stringify(keys), { mode: 0o600 });
   return keys;
+}
+
+// ---- SSRF guard: a push subscription's endpoint is user-controlled, and the
+// server makes an outbound request to it. Reject non-HTTPS and anything that
+// resolves to a private/loopback/link-local address (cloud metadata, LAN,
+// tailnet), and connect to the resolved IP with TLS SNI pinned to the hostname
+// so DNS can't rebind between the check and the request.
+
+const dns = require('dns').promises;
+const net = require('net');
+
+function isPrivateIp(ip) {
+  if (net.isIPv4(ip)) {
+    const p = ip.split('.').map(Number);
+    return p[0] === 10 || p[0] === 127 || p[0] === 0
+      || (p[0] === 169 && p[1] === 254)                 // link-local / metadata
+      || (p[0] === 172 && p[1] >= 16 && p[1] <= 31)
+      || (p[0] === 192 && p[1] === 168)
+      || (p[0] === 100 && p[1] >= 64 && p[1] <= 127);   // CGNAT / tailnet
+  }
+  const lower = ip.toLowerCase();
+  const m = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (m) return isPrivateIp(m[1]);
+  return lower === '::1' || lower === '::' || lower.startsWith('fe80') || lower.startsWith('fc') || lower.startsWith('fd');
+}
+
+// cheap synchronous check for obviously-bad endpoints (used at subscribe time)
+function endpointLooksSafe(endpoint) {
+  if (process.env.ALLOW_INSECURE_PUSH === '1') return true;
+  let url; try { url = new URL(endpoint); } catch { return false; }
+  if (url.protocol !== 'https:') return false;
+  if (net.isIP(url.hostname) && isPrivateIp(url.hostname)) return false;
+  if (/^(localhost|.*\.local)$/i.test(url.hostname)) return false;
+  return true;
+}
+
+// full async check: resolve and reject private targets; returns a safe IP to dial
+async function resolveSafeTarget(url) {
+  if (process.env.ALLOW_INSECURE_PUSH === '1') return null; // dial hostname directly (tests)
+  if (url.protocol !== 'https:') throw new Error('push endpoint must be https');
+  const addrs = await dns.lookup(url.hostname, { all: true });
+  if (!addrs.length) throw new Error('push endpoint does not resolve');
+  for (const a of addrs) if (isPrivateIp(a.address)) throw new Error('push endpoint resolves to a private address');
+  return addrs[0].address;
 }
 
 // ---- VAPID JWT (ES256, signature must be raw R||S, not DER) ----
@@ -103,17 +148,28 @@ function decryptPayload(fullBody, uaPublicRaw, uaPrivateRaw, authSecret) {
 
 // ---- send one notification; resolves { status } ----
 
-function sendNotification(subscription, payloadStr, vapid, subject) {
-  return new Promise((resolve) => {
+async function sendNotification(subscription, payloadStr, vapid, subject) {
+  let body, url, dialIp;
+  try {
     const uaPublic = b64uDec(subscription.keys.p256dh);
     const auth = b64uDec(subscription.keys.auth);
-    const body = encryptPayload(uaPublic, auth, payloadStr);
-    const url = new URL(subscription.endpoint);
+    if (uaPublic.length !== 65 || auth.length !== 16) return { status: 0, error: 'bad subscription keys' };
+    url = new URL(subscription.endpoint);
+    dialIp = await resolveSafeTarget(url);   // throws if private / non-https
+    body = encryptPayload(uaPublic, auth, payloadStr);
+  } catch (e) { return { status: 0, error: e.message }; }
+
+  return new Promise((resolve) => {
+    const insecure = process.env.ALLOW_INSECURE_PUSH === '1';
     const lib = url.protocol === 'http:' ? http : https;
     const req = lib.request({
-      method: 'POST', hostname: url.hostname, port: url.port || (url.protocol === 'http:' ? 80 : 443),
+      method: 'POST',
+      host: dialIp || url.hostname,                 // dial the vetted IP (no rebinding)
+      servername: url.hostname,                     // but validate TLS against the hostname
+      port: url.port || (url.protocol === 'http:' ? 80 : 443),
       path: url.pathname + url.search,
       headers: {
+        Host: url.host,
         'Content-Encoding': 'aes128gcm',
         'Content-Type': 'application/octet-stream',
         'Content-Length': body.length,
@@ -127,4 +183,4 @@ function sendNotification(subscription, payloadStr, vapid, subject) {
   });
 }
 
-module.exports = { loadOrCreateVapid, encryptPayload, decryptPayload, sendNotification, jwkFromRaw, b64uEnc, b64uDec };
+module.exports = { loadOrCreateVapid, encryptPayload, decryptPayload, sendNotification, endpointLooksSafe, jwkFromRaw, b64uEnc, b64uDec };

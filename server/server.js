@@ -24,7 +24,7 @@ const AUTH_WINDOW_MS = 10 * 60 * 1000;
 const STORES = ['shows', 'episodes', 'watched', 'movies', 'watchlist', 'lists', 'kv'];
 const KEY_FIELD = { shows: 'id', episodes: 'id', watched: 'epId', movies: 'id', watchlist: 'id', lists: 'id', kv: 'k' };
 
-fs.mkdirSync(DATA_DIR, { recursive: true });
+fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
 
 // ---------------- persistence ----------------
 
@@ -36,7 +36,8 @@ const tokensFile = path.join(DATA_DIR, 'tokens.json');
 const readJSON = (f, dflt) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return dflt; } };
 function writeJSON(f, obj) {
   const tmp = f + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(obj));
+  // owner-only: these files hold password hashes, session tokens, and personal data
+  fs.writeFileSync(tmp, JSON.stringify(obj), { mode: 0o600 });
   fs.renameSync(tmp, f);
 }
 // Null-prototype maps: any client-controlled key (token, username, record id,
@@ -257,6 +258,7 @@ const routes = {
   '/api/push-subscribe': (b) => {
     const u = userFor(b.token);
     if (!b.subscription || !b.subscription.endpoint) throw err(400, 'Bad subscription');
+    if (!webpush.endpointLooksSafe(b.subscription.endpoint)) throw err(400, 'Push endpoint must be a public HTTPS address');
     const st = loadUser(u);
     st.pushSubs = (st.pushSubs || []).filter(s => s.endpoint !== b.subscription.endpoint);
     st.pushSubs.push(b.subscription);
