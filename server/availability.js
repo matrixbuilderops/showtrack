@@ -75,6 +75,10 @@ async function checkUser(u, st, helpers) {
     .slice(0, CAP_PER_RUN);
   if (!shows.length) return;
 
+  // remember which alert messages already existed, so we only push genuinely new ones
+  const before = new Set(st.alerts.map(a => a.showId + '|' + a.message));
+  const fresh = [];
+
   for (const show of shows) {
     let data = null;
     if (show.imdbId) data = await apiGet(`/shows/${show.imdbId}?country=us`, key);
@@ -118,6 +122,20 @@ async function checkUser(u, st, helpers) {
   }
   helpers.persistUser(u, []);   // save lastCheck (meta)
   helpers.persistAlerts(u);
+
+  // push the newly-created alerts to the user's devices (locked-phone delivery)
+  for (const a of st.alerts) if (!before.has(a.showId + '|' + a.message)) fresh.push(a);
+  if (fresh.length && helpers.sendPush && (st.pushSubs || []).length) {
+    const payload = JSON.stringify(fresh.length === 1
+      ? { title: 'ShowTrack', body: fresh[0].message, tag: 'showtrack-alert' }
+      : { title: 'ShowTrack', body: `${fresh.length} shows are leaving a platform`, tag: 'showtrack-alert' });
+    const dead = [];
+    for (const sub of st.pushSubs) {
+      const { status } = await helpers.sendPush(sub, payload);
+      if (status === 404 || status === 410) dead.push(sub.endpoint); // subscription expired
+    }
+    if (dead.length) { st.pushSubs = st.pushSubs.filter(s => !dead.includes(s.endpoint)); helpers.persistPush(u); }
+  }
 }
 
 async function runAll(helpers) {

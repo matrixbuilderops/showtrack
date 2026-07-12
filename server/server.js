@@ -28,6 +28,9 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 
 // ---------------- persistence ----------------
 
+const webpush = require('./webpush.js');
+const VAPID = webpush.loadOrCreateVapid(DATA_DIR);
+
 const usersFile = path.join(DATA_DIR, 'users.json');
 const tokensFile = path.join(DATA_DIR, 'tokens.json');
 const readJSON = (f, dflt) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return dflt; } };
@@ -61,8 +64,14 @@ function loadUser(u) {
   state.lastCheck = meta.lastCheck || {};
   for (const s of STORES) state.tombstones[s] = nullMap(meta.tombstones && meta.tombstones[s]);
   state.alerts = readJSON(path.join(dir, 'alerts.json'), []);
+  state.pushSubs = readJSON(path.join(dir, 'push.json'), []);
   cache[u] = state;
   return state;
+}
+
+function persistPush(u) {
+  const dir = userDir(u); fs.mkdirSync(dir, { recursive: true });
+  writeJSON(path.join(dir, 'push.json'), cache[u].pushSubs || []);
 }
 
 function persistUser(u, changedStores) {
@@ -244,6 +253,22 @@ const routes = {
     const u = userFor(b.token); const st = loadUser(u);
     st.alerts = []; persistAlerts(u); return { ok: true };
   },
+  '/api/vapid-public': (b) => { userFor(b.token); return { key: VAPID.publicKey }; },
+  '/api/push-subscribe': (b) => {
+    const u = userFor(b.token);
+    if (!b.subscription || !b.subscription.endpoint) throw err(400, 'Bad subscription');
+    const st = loadUser(u);
+    st.pushSubs = (st.pushSubs || []).filter(s => s.endpoint !== b.subscription.endpoint);
+    st.pushSubs.push(b.subscription);
+    persistPush(u);
+    return { ok: true };
+  },
+  '/api/push-unsubscribe': (b) => {
+    const u = userFor(b.token); const st = loadUser(u);
+    st.pushSubs = (st.pushSubs || []).filter(s => s.endpoint !== (b.endpoint || (b.subscription && b.subscription.endpoint)));
+    persistPush(u);
+    return { ok: true };
+  },
 };
 
 // Static serving of the app itself, so app + API share one origin (no CORS,
@@ -301,6 +326,7 @@ server.listen(PORT, () => {
 
 // ---------------- background availability checks ----------------
 require('./availability.js').schedule({
-  loadUser, persistAlerts, persistUser,
+  loadUser, persistAlerts, persistUser, persistPush,
   listUsers: () => Object.keys(users),
+  sendPush: (sub, payload) => webpush.sendNotification(sub, payload, VAPID),
 });

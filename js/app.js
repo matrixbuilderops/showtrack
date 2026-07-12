@@ -3,6 +3,7 @@ import { tvmaze, normalizeShow, normalizeEpisode, autoPlatform } from './api.js'
 import { tmdb, tmdbImg } from './tmdb.js';
 import { startImportUI } from './import.js';
 import { sync, registerAccount, loginAccount, signOut, syncNow, fetchAlerts, clearAlerts } from './sync.js';
+import { push } from './push.js';
 
 // ---------- tiny helpers ----------
 
@@ -1118,8 +1119,34 @@ function renderSyncUI() {
     $('#sync-status').textContent =
       `Signed in as ${sync.username()} · ${sync.server()}` +
       (at ? ` · last synced ${new Date(at).toLocaleString()}` : ' · not synced yet');
+    refreshPushUI();
   }
 }
+
+async function refreshPushUI() {
+  const btn = $('#btn-notifications'), note = $('#push-note');
+  if (!btn) return;
+  if (!push.supported()) {
+    btn.classList.add('hidden');
+    note.textContent = 'Notifications need this app installed to your home screen (on iPhone, add it via Share → Add to Home Screen first).';
+    return;
+  }
+  btn.classList.remove('hidden');
+  const on = await push.isSubscribed();
+  btn.innerHTML = on ? '&#128276; Notifications on — tap to turn off' : '&#128276; Enable phone notifications';
+  note.textContent = on ? 'This device will get alerted when a show is leaving a platform, even when the app is closed.' : '';
+}
+
+$('#btn-notifications').addEventListener('click', async () => {
+  const btn = $('#btn-notifications');
+  btn.disabled = true;
+  try {
+    if (await push.isSubscribed()) { await push.disable(); toast('Notifications off'); }
+    else { await push.enable(); toast('Notifications on'); }
+  } catch (e) { toast(e.message); }
+  btn.disabled = false;
+  refreshPushUI();
+});
 
 async function doSyncNow(silent = false) {
   if (!sync.configured()) return;
