@@ -1,18 +1,22 @@
 {
   "manifest_version": 3,
   "name": "ShowTrack Scrobbler",
-  "version": "1.0",
+  "version": "1.1",
   "description": "Auto-marks the episodes you watch on streaming sites into your ShowTrack app.",
   "permissions": ["storage", "activeTab"],
   "optional_host_permissions": ["*://*/*"],
   "host_permissions": [
     "*://*.netflix.com/*",
-    "*://*.crunchyroll.com/*",
+    "*://*.primevideo.com/*",
+    "*://*.amazon.com/*",
     "*://*.hulu.com/*",
+    "*://*.crunchyroll.com/*",
+    "*://*.paramountplus.com/*",
+    "*://tv.apple.com/*",
     "*://*.disneyplus.com/*",
     "*://*.max.com/*",
-    "*://*.primevideo.com/*",
-    "*://*.amazon.com/*"
+    "*://*.peacocktv.com/*",
+    "*://*.youtube.com/*"
   ],
   "action": { "default_popup": "popup.html", "default_title": "ShowTrack" },
   "background": { "service_worker": "background.js" },
@@ -20,12 +24,16 @@
     {
       "matches": [
         "*://*.netflix.com/*",
-        "*://*.crunchyroll.com/*",
+        "*://*.primevideo.com/*",
+        "*://*.amazon.com/*",
         "*://*.hulu.com/*",
+        "*://*.crunchyroll.com/*",
+        "*://*.paramountplus.com/*",
+        "*://tv.apple.com/*",
         "*://*.disneyplus.com/*",
         "*://*.max.com/*",
-        "*://*.primevideo.com/*",
-        "*://*.amazon.com/*"
+        "*://*.peacocktv.com/*",
+        "*://*.youtube.com/*"
       ],
       "js": ["content.js"],
       "run_at": "document_idle",

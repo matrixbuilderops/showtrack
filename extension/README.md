@@ -1,8 +1,11 @@
 # ShowTrack Scrobbler (browser extension)
 
 Auto-marks episodes you watch on streaming sites into your ShowTrack app, and
-tags them with the platform you watched on. Works on Netflix and Crunchyroll
-with tailored detection, and best-effort on Hulu, Disney+, Max, and Prime Video.
+tags them with the platform you watched on. It uses the browser's standard Media
+Session API as its backbone (works on most sites) plus tailored detection for
+Netflix, Prime Video, Disney+, and Crunchyroll. Supported sites: **Netflix,
+Prime Video, Hulu, Crunchyroll, Paramount+, Apple TV+, Disney+, Max, Peacock,
+YouTube**.
 
 **It only sees what you watch in this browser on this computer** — phone apps and
 TVs can't be tracked (no service exposes that). Use it on the desktop where you
@@ -30,6 +33,9 @@ means a scrobble just landed.
 
 ## Tuning
 
-If a site changes its layout and detection stops working, the selectors live in
-`content.js` (`parseNetflix`, `parseCrunchyroll`, `parseGeneric`). The generic
-parser reads the page title, so most sites work without site-specific code.
+Detection is layered in `content.js`: the Media Session API (`fromMediaSession`)
+is the cross-site backbone, per-site DOM selectors live in the `SITE` registry
+(Netflix, Prime Video, Disney+, Crunchyroll), and `derive()` falls back to the
+page title. If a site changes its layout and detection drifts, add or fix its
+entry in `SITE`, or rely on the Media Session / title fallback which needs no
+site-specific code.
