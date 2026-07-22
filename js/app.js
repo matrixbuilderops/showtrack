@@ -447,6 +447,7 @@ async function followShow(tvmazeId) {
 // ---------- episode sync ----------
 
 export async function syncShowEpisodes(showId) {
+  if (String(showId).startsWith('tvt-')) return 0; // placeholder show: not on TVmaze, nothing to fetch
   const eps = await tvmaze.episodes(showId);
   await db.putMany('episodes', eps.map(e => normalizeEpisode(e, showId)));
   const show = await db.get('shows', showId);
@@ -458,6 +459,7 @@ async function syncStaleShows({ force = false } = {}) {
   const shows = await db.all('shows');
   const dayAgo = Date.now() - 86400000;
   const stale = shows.filter(s => {
+    if (String(s.id).startsWith('tvt-')) return false; // placeholder: no TVmaze episodes to fetch
     if (!s.lastEpisodeSync) return true;
     if (force) return s.status !== 'Ended';
     return s.status !== 'Ended' && new Date(s.lastEpisodeSync).getTime() < dayAgo;

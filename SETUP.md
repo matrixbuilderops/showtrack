@@ -8,6 +8,23 @@ If you only want the app on your phone with no sync/extension, skip to
 
 ---
 
+## Before you begin — what to bring to the computer
+
+Two separate things travel to the machine you're setting up:
+
+1. **The code** — cloned from the repo in Part 1b below. This is the app, the
+   server, and the extension. It contains **none of your data**.
+2. **`showtrack-backup.json`** — the ~27 MB export of your library (1,700+ shows,
+   movies, watchlist, custom lists). This is **not** in the repo; copy it across
+   separately (USB, a private transfer, etc.). **Your three API keys — TMDB,
+   RapidAPI, and TheTVDB — are baked inside this file.** Loading it (Part 2) both
+   restores your library *and* configures every "where to watch" and movie-search
+   feature. There is no separate key-entry step — you never type an API key
+   anywhere.
+
+If you have the repo but not `showtrack-backup.json`, stop and get that file
+first: without it the app runs but has no library and no working API keys.
+
 ## Part 1 — The server (on your computer)
 
 The server keeps your devices in sync and powers the extension and notifications.
